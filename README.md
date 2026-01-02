@@ -205,7 +205,6 @@ This is the **third and final stage (P3)** of the preprocessing pipeline. It ext
 - **Centralized output:**
   - All final ears saved to `Final_Cropped_Ears_256/` directory
 
----
 
 ### 🔍 Steps Performed in P3
 
@@ -233,4 +232,5 @@ This is the **third and final stage (P3)** of the preprocessing pipeline. It ext
 - Ensures standardized coordinate system
 - Saves final volumes to both patient directory and centralized folder
 
+---
 
