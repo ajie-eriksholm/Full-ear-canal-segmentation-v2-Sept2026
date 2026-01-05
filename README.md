@@ -175,7 +175,7 @@ A **two-step rotation** process to standardize orientation:
 **3D U-Net** with:
 - **Encoder:** 4 levels with double convolutions, max pooling
 - **Decoder:** 3 levels with upsampling and skip connections
-- **Normalization:** Instance normalization (better for medical imaging)
+- **Normalization:** Instance normalization 
 - **Output:** 6-channel heatmap (one per landmark)
 - **Base features:** 16 (lightweight for 3D volumes)
 
