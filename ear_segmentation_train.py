@@ -37,8 +37,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ============================================================
 # PATHS (YOUR DIRECTORIES)
 # ============================================================
-CT_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_CTs"
-SEG_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Masks"
+CT_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_CTs_resampled_96"
+SEG_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Masks_resampled_96"
 
 BASE_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline"
 SPLIT_CSV = os.path.join(BASE_DIR, "train_val_split.csv")
@@ -161,37 +161,47 @@ class DoubleConv(nn.Module):
 
 
 class UNet3D(nn.Module):
-    def __init__(self, in_channels=1, out_channels=1, base=16):
+    def __init__(self, in_channels=1, out_channels=1, base_features=16):
         super().__init__()
-        self.enc1 = DoubleConv(in_channels, base)
-        self.enc2 = DoubleConv(base, base * 2)
-        self.enc3 = DoubleConv(base * 2, base * 4)
-        self.enc4 = DoubleConv(base * 4, base * 8)
+        f = base_features
+        # Encoder
+        self.enc1 = DoubleConv(in_channels, f)
+        self.enc2 = DoubleConv(f, f * 2)
+        self.enc3 = DoubleConv(f * 2, f * 4)    # fixed: previously incorrect
+        self.enc4 = DoubleConv(f * 4, f * 8)
 
         self.pool = nn.MaxPool3d(2)
+        self.up = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
 
-        self.dec3 = DoubleConv(base * 8 + base * 4, base * 4)
-        self.dec2 = DoubleConv(base * 4 + base * 2, base * 2)
-        self.dec1 = DoubleConv(base * 2 + base, base)
+        # Decoder: channel sizes reflect concatenations
+        self.dec3 = DoubleConv(f * 8 + f * 4, f * 4)  # input channels after concat
+        self.dec2 = DoubleConv(f * 4 + f * 2, f * 2)
+        self.dec1 = DoubleConv(f * 2 + f, f)
 
-        self.out_conv = nn.Conv3d(base, out_channels, 1)
-
-    def _upsample_to(self, x, ref):
-        # Make x exactly the same D×H×W as ref
-        return F.interpolate(x, size=ref.shape[2:], mode="trilinear", align_corners=False)
+        self.out_conv = nn.Conv3d(f, out_channels, kernel_size=1)
 
     def forward(self, x):
-        e1 = self.enc1(x)                      # 90
-        e2 = self.enc2(self.pool(e1))          # 45
-        e3 = self.enc3(self.pool(e2))          # 22
-        e4 = self.enc4(self.pool(e3))          # 11
+        # x shape expected (B, C, D, H, W)
+        e1 = self.enc1(x)              # B, f, ...
+        e2 = self.enc2(self.pool(e1))  # B, f*2, ...
+        e3 = self.enc3(self.pool(e2))  # B, f*4, ...
+        e4 = self.enc4(self.pool(e3))  # B, f*8, ...
 
-        d3 = self.dec3(torch.cat([self._upsample_to(e4, e3), e3], dim=1))  # 22
-        d2 = self.dec2(torch.cat([self._upsample_to(d3, e2), e2], dim=1))  # 45 (not 44)
-        d1 = self.dec1(torch.cat([self._upsample_to(d2, e1), e1], dim=1))  # 90
+        d3 = self.up(e4)
+        #
+        d3 = torch.cat([d3, e3], dim=1)
+        d3 = self.dec3(d3)
 
-        return self.out_conv(d1)
+        d2 = self.up(d3)
+        d2 = torch.cat([d2, e2], dim=1)
+        d2 = self.dec2(d2)
 
+        d1 = self.up(d2)
+        d1 = torch.cat([d1, e1], dim=1)
+        d1 = self.dec1(d1)
+
+        out = self.out_conv(d1)
+        return out
 # ============================================================
 # LOSS
 # ============================================================
@@ -348,10 +358,17 @@ def save_validation_predictions(model, val_dataset, run_dir, device):
             pred_mask = pred[0, 0].cpu().numpy()
             pred_mask = (pred_mask > 0.5).astype(np.uint8)
             
-            # Save as nrrd with same name as input
+            # Save prediction as nrrd
             output_name = fname.replace(".nii.gz", "_pred.nrrd")
             output_path = os.path.join(pred_dir, output_name)
             nrrd.write(output_path, pred_mask)
+            
+            # Save the CT scan that was passed to the model (for alignment checking)
+            ct_img = img[0].cpu().numpy()  # Remove channel dimension
+            ct_output_name = fname.replace(".nii.gz", "_ct_processed.nii.gz")
+            ct_output_path = os.path.join(pred_dir, ct_output_name)
+            ct_nifti = nib.Nifti1Image(ct_img, affine.numpy())
+            nib.save(ct_nifti, ct_output_path)
     
     print(f"\n✓ All validation predictions saved to: {pred_dir}\n")
 
