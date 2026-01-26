@@ -28,21 +28,30 @@ from monai.transforms import (
 BATCH_SIZE = 1
 NUM_WORKERS = 8
 LR = 1e-4
-MAX_EPOCHS = 300
+MAX_EPOCHS = 500
 SEED = 12345
 TRAIN_RATIO = 0.85
-NUM_LANDMARKS = 5  # Number of heatmap channels to predict
-LANDMARK_IDS = [1, 2, 3, 4, 5]  # Landmark IDs for tracking
-HEATMAP_VIZ_SLICE = None  # Which slice to visualize (None = middle slice)
+NUM_LANDMARKS = 7  # Number of heatmap channels to predict
+LANDMARK_IDS = [1, 2, 3, 4, 5, 6, 7]  # Landmark IDs for tracking
+# Visualization slice for each landmark (None = middle slice, or specify integer)
+HEATMAP_VIZ_SLICE = {
+    1: 53,  # Landmark 1: middle slice
+    2: 55,  # Landmark 2: middle slice
+    3: 52,  # Landmark 3: middle slice
+    4: 64,  # Landmark 4: middle slice
+    5: 63,  # Landmark 5: middle slice
+    6: 57,  # Landmark 6: middle slice
+    7: 51   # Landmark 7: middle slice
+}
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ============================================================
 # PATHS (YOUR DIRECTORIES)
 # ============================================================
-CT_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_CTs_resampled_96"
-SEG_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Masks_resampled_96"
-HEATMAPS_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Precomputed_Heatmaps_resampled_96"
+CT_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_CTs_resampled_128"
+SEG_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Masks_resampled_128"
+HEATMAPS_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Precomputed_Heatmaps_resampled_128_Corrected"
 
 BASE_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline"
 SPLIT_CSV = os.path.join(BASE_DIR, "train_val_split.csv")
@@ -189,48 +198,72 @@ class DoubleConv(nn.Module):
 
 
 class UNet3D(nn.Module):
-    def __init__(self, in_channels=1, seg_channels=1, heatmap_channels=5, base_features=16):
+    def __init__(self, in_channels=1, seg_channels=1, heatmap_channels=5, base_features=32):
         super().__init__()
         f = base_features
-        # Encoder
+        # Shared Encoder
         self.enc1 = DoubleConv(in_channels, f)
         self.enc2 = DoubleConv(f, f * 2)
         self.enc3 = DoubleConv(f * 2, f * 4)
         self.enc4 = DoubleConv(f * 4, f * 8)
+        self.enc5 = DoubleConv(f * 8, f * 16)
 
         self.pool = nn.MaxPool3d(2)
         self.up = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
 
-        # Decoder: channel sizes reflect concatenations
+        # Shared decoder (high-level features)
+        self.dec4 = DoubleConv(f * 16 + f * 8, f * 8)
         self.dec3 = DoubleConv(f * 8 + f * 4, f * 4)
-        self.dec2 = DoubleConv(f * 4 + f * 2, f * 2)
-        self.dec1 = DoubleConv(f * 2 + f, f)
-
-        # Dual output heads
+        
+        # Task-specific decoders (diverge at dec2 level)
+        # Segmentation branch
+        self.seg_dec2 = DoubleConv(f * 4 + f * 2, f * 2)
+        self.seg_dec1 = DoubleConv(f * 2 + f, f)
         self.seg_conv = nn.Conv3d(f, seg_channels, kernel_size=1)
+        
+        # Heatmap branch
+        self.heat_dec2 = DoubleConv(f * 4 + f * 2, f * 2)
+        self.heat_dec1 = DoubleConv(f * 2 + f, f)
         self.heatmap_conv = nn.Conv3d(f, heatmap_channels, kernel_size=1)
 
     def forward(self, x):
-        # x shape expected (B, C, D, H, W)
+        # Shared encoder
         e1 = self.enc1(x)              # B, f, ...
         e2 = self.enc2(self.pool(e1))  # B, f*2, ...
         e3 = self.enc3(self.pool(e2))  # B, f*4, ...
         e4 = self.enc4(self.pool(e3))  # B, f*8, ...
+        e5 = self.enc5(self.pool(e4))  # B, f*16, ... (bottleneck)
 
-        d3 = self.up(e4)
+        # Shared decoder (high-level)
+        d4 = self.up(e5)
+        d4 = torch.cat([d4, e4], dim=1)
+        d4 = self.dec4(d4)
+
+        d3 = self.up(d4)
         d3 = torch.cat([d3, e3], dim=1)
         d3 = self.dec3(d3)
+        
+        # Task-specific branches (diverge here)
+        # Segmentation path
+        seg_d2 = self.up(d3)
+        seg_d2 = torch.cat([seg_d2, e2], dim=1)
+        seg_d2 = self.seg_dec2(seg_d2)
+        
+        seg_d1 = self.up(seg_d2)
+        seg_d1 = torch.cat([seg_d1, e1], dim=1)
+        seg_d1 = self.seg_dec1(seg_d1)
+        seg_out = self.seg_conv(seg_d1)
+        
+        # Heatmap path
+        heat_d2 = self.up(d3)
+        heat_d2 = torch.cat([heat_d2, e2], dim=1)
+        heat_d2 = self.heat_dec2(heat_d2)
+        
+        heat_d1 = self.up(heat_d2)
+        heat_d1 = torch.cat([heat_d1, e1], dim=1)
+        heat_d1 = self.heat_dec1(heat_d1)
+        heatmap_out = self.heatmap_conv(heat_d1)
 
-        d2 = self.up(d3)
-        d2 = torch.cat([d2, e2], dim=1)
-        d2 = self.dec2(d2)
-
-        d1 = self.up(d2)
-        d1 = torch.cat([d1, e1], dim=1)
-        d1 = self.dec1(d1)
-
-        seg_out = self.seg_conv(d1)
-        heatmap_out = self.heatmap_conv(d1)
         return seg_out, heatmap_out
 # ============================================================
 # LOSS
@@ -283,16 +316,19 @@ class CombinedLoss(nn.Module):
 # ============================================================
 # LANDMARK DISTANCE COMPUTATION
 # ============================================================
-def compute_landmark_distances(pred_heatmaps, gt_heatmaps, orig_affine, landmark_ids, threshold=0.5):
+def compute_landmark_distances(pred_heatmaps, gt_heatmaps, orig_affine, landmark_ids, threshold=0.5, return_coords=False):
     """
     Compute distances between predicted and ground truth landmark centroids.
     pred_heatmaps: (num_landmarks, D, H, W) numpy array
     gt_heatmaps: (num_landmarks, D, H, W) numpy array
     orig_affine: (4,4) numpy array (voxel->world)
-    Returns: distances_mm (array of distances in mm)
+    return_coords: if True, also return pred and gt world coordinates
+    Returns: distances_mm (array of distances in mm), or (distances_mm, pred_coords, gt_coords)
     """
     num = len(landmark_ids)
     distances_mm = np.zeros(num, dtype=float)
+    pred_coords_mm = np.zeros((num, 3), dtype=float)
+    gt_coords_mm = np.zeros((num, 3), dtype=float)
 
     for i, lm_id in enumerate(landmark_ids):
         pred_heatmap = pred_heatmaps[i]
@@ -324,7 +360,11 @@ def compute_landmark_distances(pred_heatmaps, gt_heatmaps, orig_affine, landmark
         gt_world = orig_affine @ gt_voxel
         dist_mm = np.linalg.norm(pred_world[:3] - gt_world[:3])
         distances_mm[i] = dist_mm
+        pred_coords_mm[i] = pred_world[:3]
+        gt_coords_mm[i] = gt_world[:3]
 
+    if return_coords:
+        return distances_mm, pred_coords_mm, gt_coords_mm
     return distances_mm
 
 # ============================================================
@@ -335,7 +375,7 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs, run_dir, 
     model.to(DEVICE)
 
     best_val_loss = float("inf")
-    scheduler = ReduceLROnPlateau(optimizer, mode="min", patience=15, factor=0.5)
+    scheduler = ReduceLROnPlateau(optimizer, mode="min", patience=20, factor=0.5)
 
     for epoch in range(1, epochs + 1):
         print(f"\nEpoch {epoch}/{epochs}")
@@ -354,6 +394,7 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs, run_dir, 
             
             loss, seg_l, heatmap_l = loss_fn(seg_logits, heatmap_logits, masks, heatmaps)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             train_loss += loss.item()
@@ -396,6 +437,27 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs, run_dir, 
         val_heatmap_loss /= len(val_loader)
         avg_val_distances = np.mean(val_distances_mm, axis=0) if val_distances_mm else np.zeros(len(landmark_ids))
         
+        # Debug: Print GT vs Predicted coordinates for first validation sample
+        if len(val_dataset) > 0:
+            val_img_debug, val_mask_debug, val_heatmaps_debug, val_affine_debug = val_dataset[0]
+            val_img_debug_batch = val_img_debug.unsqueeze(0).to(DEVICE)
+            seg_debug, heatmap_debug = model(val_img_debug_batch)
+            pred_heatmaps_debug = torch.sigmoid(heatmap_debug[0]).cpu().detach().numpy()
+            gt_heatmaps_debug = val_heatmaps_debug.cpu().numpy()
+            orig_affine_debug = val_affine_debug.cpu().numpy()
+            distances_debug, pred_coords_debug, gt_coords_debug = compute_landmark_distances(
+                pred_heatmaps_debug, gt_heatmaps_debug, orig_affine_debug, landmark_ids, return_coords=True
+            )
+            print("\n" + "="*80)
+            print(f"VALIDATION DEBUG - First sample ({val_dataset.file_list[0]})")
+            print("="*80)
+            for i, lm_id in enumerate(landmark_ids):
+                print(f"Landmark {lm_id}:")
+                print(f"  GT (mm):   [{gt_coords_debug[i, 0]:7.2f}, {gt_coords_debug[i, 1]:7.2f}, {gt_coords_debug[i, 2]:7.2f}]")
+                print(f"  Pred (mm): [{pred_coords_debug[i, 0]:7.2f}, {pred_coords_debug[i, 1]:7.2f}, {pred_coords_debug[i, 2]:7.2f}]")
+                print(f"  Distance:  {distances_debug[i]:.2f} mm")
+            print("="*80 + "\n")
+        
         scheduler.step(val_loss)
 
         current_lr = optimizer.param_groups[0]['lr']
@@ -425,13 +487,13 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs, run_dir, 
             seg_pred = torch.sigmoid(seg_pred)
             heatmap_pred = torch.sigmoid(heatmap_pred)
             
-            # Get visualization slice (H dimension - coronal view)
-            slice_idx = HEATMAP_VIZ_SLICE if HEATMAP_VIZ_SLICE is not None else val_mask.shape[2] // 2
+            # Get middle slice for segmentation visualization
+            seg_slice_idx = val_mask.shape[2] // 2
             
             # Segmentation visualization
-            img_slice = val_img[0, :, slice_idx, :].cpu().numpy()  # (D, W)
-            mask_slice = val_mask[0, :, slice_idx, :].cpu().numpy()  # (D, W)
-            seg_pred_slice = seg_pred[0, 0, :, slice_idx, :].cpu().numpy()  # (D, W)
+            img_slice = val_img[0, :, seg_slice_idx, :].cpu().numpy()  # (D, W)
+            mask_slice = val_mask[0, :, seg_slice_idx, :].cpu().numpy()  # (D, W)
+            seg_pred_slice = seg_pred[0, 0, :, seg_slice_idx, :].cpu().numpy()  # (D, W)
             
             # Enhance contrast for CT image visualization
             img_slice_vis = np.clip(img_slice, 0, 1)
@@ -441,12 +503,24 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs, run_dir, 
             seg_vis = np.hstack([img_slice_vis, mask_slice, seg_pred_slice])
             writer.add_image("Val/Segmentation_Image_GT_Pred", seg_vis[None, :, :], epoch, dataformats='CHW')
             
-            # Heatmap visualization for each landmark
+            # Heatmap visualization for each landmark (with per-landmark slice selection)
             for i, lm_id in enumerate(landmark_ids):
-                heatmap_gt_slice = val_heatmaps_gt[i, :, slice_idx, :].cpu().numpy()  # (D, W)
-                heatmap_pred_slice = heatmap_pred[0, i, :, slice_idx, :].cpu().numpy()  # (D, W)
+                # Get slice index for this specific landmark
+                lm_slice_idx = HEATMAP_VIZ_SLICE.get(lm_id, None)
+                if lm_slice_idx is None:
+                    lm_slice_idx = val_mask.shape[2] // 2  # Default to middle slice
                 
-                heatmap_vis = np.hstack([img_slice_vis, heatmap_gt_slice, heatmap_pred_slice])
+                # Extract slices for this landmark's visualization
+                lm_img_slice = val_img[0, :, lm_slice_idx, :].cpu().numpy()  # (D, W)
+                heatmap_gt_slice = val_heatmaps_gt[i, :, lm_slice_idx, :].cpu().numpy()  # (D, W)
+                heatmap_pred_slice = heatmap_pred[0, i, :, lm_slice_idx, :].cpu().numpy()  # (D, W)
+                
+                # Enhance contrast for this landmark's image slice
+                lm_img_slice_vis = np.clip(lm_img_slice, 0, 1)
+                if lm_img_slice_vis.max() > lm_img_slice_vis.min():
+                    lm_img_slice_vis = (lm_img_slice_vis - lm_img_slice_vis.min()) / (lm_img_slice_vis.max() - lm_img_slice_vis.min())
+                
+                heatmap_vis = np.hstack([lm_img_slice_vis, heatmap_gt_slice, heatmap_pred_slice])
                 writer.add_image(f"Val/Heatmap_LM{lm_id}_Image_GT_Pred", heatmap_vis[None, :, :], epoch, dataformats='CHW')
 
         print(f"Train Loss: {train_loss:.4f} (Seg: {train_seg_loss:.4f}, Heatmap: {train_heatmap_loss:.4f})")
@@ -588,7 +662,7 @@ if __name__ == "__main__":
                             num_workers=NUM_WORKERS, pin_memory=True)
 
     model = UNet3D(in_channels=1, seg_channels=1, heatmap_channels=NUM_LANDMARKS)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=5e-4)
     loss_fn = CombinedLoss(seg_weight=1.0, heatmap_weight=1.0)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
