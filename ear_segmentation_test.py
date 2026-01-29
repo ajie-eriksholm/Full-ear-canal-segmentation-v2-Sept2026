@@ -202,7 +202,9 @@ def run_inference():
     # Get all test CT files
     ct_files = sorted([f for f in os.listdir(TEST_DIR) if f.endswith('.nii.gz') or f.endswith('.nii')])
     
-    print(f"Found {len(ct_files)} test CT scans\n")
+    
+    
+    print(f"Found {len(ct_files)} test CT scans (processing first 2 only)\n")
     
     if len(ct_files) == 0:
         print("No CT files found in test directory!")
@@ -278,9 +280,9 @@ def run_inference():
                     landmark_data.append({
                         'scan_name': ct_file,
                         'landmark_id': lm_id,
-                        'x_mm': landmark_coords[i, 0],
+                        'x_mm': -landmark_coords[i, 2],
                         'y_mm': landmark_coords[i, 1],
-                        'z_mm': landmark_coords[i, 2]
+                        'z_mm': -landmark_coords[i, 0]
                     })
                 
                 successful += 1
