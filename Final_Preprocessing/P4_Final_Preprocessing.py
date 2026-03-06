@@ -7,8 +7,8 @@ from tqdm import tqdm
 
 # upsampling and normalization 
 
-PROCESS_DATA_DIR = r"\\kbnnfsserver\erhdata\Processed-Data\SBEO\High-quality-scans\Processed-Data"
-OUTPUT_DATA_DIR = r"\\kbnnfsserver\erhdata\Processed-Data\SBEO\High-quality-scans\Output\Inference Scans"
+PROCESS_DATA_DIR = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
+OUTPUT_DATA_DIR = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output/Inference Scans"
 
 # Target resolution
 TARGET_SHAPE = (128, 128, 128)
