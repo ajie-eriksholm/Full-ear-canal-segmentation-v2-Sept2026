@@ -11,6 +11,7 @@ import pyvista as pv
 import traceback
 from scipy.spatial.transform import Rotation as R
 from scipy.ndimage import affine_transform
+from totalsegmentator.python_api import totalsegmentator
 
 # Configure PyVista for off-screen rendering
 pv.set_plot_theme("document")
@@ -22,11 +23,17 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 # Configuration
-Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Processed_data"
-landmark_detection_model_path = r"/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/best_model_2025-12-05_13-16-35.pth"
-output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output"
+Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
+landmark_detection_model_path = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/best_model_2025-12-05_13-16-35.pth"
+output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output"
 output_transform_dir = os.path.join(output_dir, "transform_logs")
 
+# Debug mode - process only one specific scan
+debug_mode = False  # Set to False to process all scans
+debug_scan_name = "sub01_pituitary_CT_resampled_256.nii.gz"  # Specific scan to process in debug mode
+
+# No eyes mode - use mandible segmentation instead of eye landmarks for plane fitting
+no_eyes = True  # Set to True if scans don't include eyes (uses mandible top points instead of landmarks 12-13)
 
 # Device configuration
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -217,6 +224,130 @@ def load_nii(nii_path):
     return img_tensor, nii.affine
 
 
+def segment_craniofacial_structures(input_path, output_dir, scan_name):
+    """
+    Segment craniofacial structures using TotalSegmentator.
+    Reference: Wasserthal et al. (2023) TotalSegmentator: Robust Segmentation of 104 Anatomic Structures in CT Images.
+               Radiology: Artificial Intelligence. https://doi.org/10.1148/ryai.230024
+    
+    Args:
+        input_path: Path to the input NIfTI scan
+        output_dir: Directory to save segmentation results
+        scan_name: Name of the scan for output files
+    
+    Returns:
+        Dictionary with segmentation masks for each structure
+    """
+    print(f"  Running TotalSegmentator for craniofacial structures...")
+    
+    # Run totalsegmentator with craniofacial task
+    # Available structures: mandible, teeth_lower, skull, head, sinus_maxillary, sinus_frontal, teeth_upper
+    segmentation_img = totalsegmentator(input_path, task='craniofacial_structures')
+    
+    if segmentation_img is None:
+        raise ValueError("Craniofacial segmentation failed or returned no output.")
+    
+    # Save segmentation
+    seg_output_path = os.path.join(output_dir, f"{scan_name}_craniofacial_segmented.nii.gz")
+    nib.save(segmentation_img, seg_output_path)
+    print(f"  Craniofacial segmentation saved to {seg_output_path}")
+    
+    return segmentation_img, seg_output_path
+
+
+def extract_mandible_top_points(segmentation_data, affine, scan_name):
+    """
+    Extract the top (superior) points of the mandible on left and right sides.
+    These points will be used as replacements for eye landmarks (lm12, lm13) in no_eyes mode.
+    
+    Args:
+        segmentation_data: 3D numpy array of segmentation labels
+        affine: Affine transformation matrix
+        scan_name: Name of the scan (for logging)
+    
+    Returns:
+        Tuple of (left_top_point, right_top_point) in world coordinates (mm)
+    """
+    # TotalSegmentator label for mandible is typically 1
+    # Check for mandible label - it might vary by version
+    unique_labels = np.unique(segmentation_data)
+    print(f"  Unique segmentation labels found: {unique_labels}")
+    
+    # Try common mandible label IDs
+    mandible_label = None
+    for label_id in [1, 126]:  # Common labels for mandible
+        if label_id in unique_labels:
+            mandible_label = label_id
+            break
+    
+    if mandible_label is None:
+        raise ValueError(f"Mandible label not found in segmentation. Available labels: {unique_labels}")
+    
+    print(f"  Using mandible label: {mandible_label}")
+    
+    # Extract mandible mask
+    mandible_mask = (segmentation_data == mandible_label)
+    mandible_coords = np.argwhere(mandible_mask)
+    
+    if mandible_coords.size == 0:
+        raise ValueError("No mandible voxels found in segmentation")
+    
+    print(f"  Found {len(mandible_coords)} mandible voxels")
+    
+    # Convert voxel coordinates to world coordinates
+    mandible_coords_homogeneous = np.hstack([mandible_coords[:, [2, 1, 0]], np.ones((len(mandible_coords), 1))])
+    mandible_world = (affine @ mandible_coords_homogeneous.T).T[:, :3]
+    
+    # Apply the same coordinate correction as for landmarks: (x,y,z) -> (z,-y,-x)
+    mandible_world_corrected = np.column_stack([
+        mandible_world[:, 2],   # z -> x
+        -mandible_world[:, 1],  # -y -> y  
+        -mandible_world[:, 0]   # -x -> z
+    ])
+    
+    print(f"  Mandible coordinate ranges:")
+    print(f"    X (left-right): [{mandible_world_corrected[:, 0].min():.2f}, {mandible_world_corrected[:, 0].max():.2f}]")
+    print(f"    Y (anterior-posterior): [{mandible_world_corrected[:, 1].min():.2f}, {mandible_world_corrected[:, 1].max():.2f}]")
+    print(f"    Z (inferior-superior): [{mandible_world_corrected[:, 2].min():.2f}, {mandible_world_corrected[:, 2].max():.2f}]")
+    
+    # Find the center point (approximate midline) using mean of X coordinate
+    center_x = np.mean(mandible_world_corrected[:, 0])
+    print(f"  Midline X-coordinate (mean): {center_x:.2f}")
+    
+    # Split into left and right halves based on X coordinate
+    # In anatomical coordinates: negative X = left, positive X = right
+    left_mask = mandible_world_corrected[:, 0] < center_x
+    right_mask = mandible_world_corrected[:, 0] >= center_x
+    
+    left_points = mandible_world_corrected[left_mask]
+    right_points = mandible_world_corrected[right_mask]
+    
+    if len(left_points) == 0 or len(right_points) == 0:
+        raise ValueError("Could not split mandible into left and right halves")
+    
+    print(f"  Left side: {len(left_points)} points")
+    print(f"  Right side: {len(right_points)} points")
+    
+    # For each side, find the topmost (maximum Z) point
+    # Z-axis is superior-inferior, so max Z is the top
+    left_top_idx = np.argmax(left_points[:, 2])
+    right_top_idx = np.argmax(right_points[:, 2])
+    
+    left_top_point = left_points[left_top_idx]
+    right_top_point = right_points[right_top_idx]
+    
+    print(f"  Left mandible top point (X < {center_x:.2f}): ({left_top_point[0]:.2f}, {left_top_point[1]:.2f}, {left_top_point[2]:.2f})")
+    print(f"  Right mandible top point (X >= {center_x:.2f}): ({right_top_point[0]:.2f}, {right_top_point[1]:.2f}, {right_top_point[2]:.2f})")
+    
+    # Verify that points are on opposite sides
+    if left_top_point[0] >= right_top_point[0]:
+        print(f"  WARNING: Left point X ({left_top_point[0]:.2f}) should be < Right point X ({right_top_point[0]:.2f})")
+    else:
+        print(f"  ✓ Verification passed: Left point X < Right point X")
+    
+    return left_top_point, right_top_point
+
+
 def visualize_landmarks_with_scan(scan_data, all_landmarks, output_png_path, threshold=-300):
     """
     Visualize the scan mask with landmarks in three views and save as PNG.
@@ -365,6 +496,17 @@ def process_scans():
                 nii_files.append(os.path.join(root, file))
     
     nii_files = sorted(nii_files)
+    
+    # Filter scans if debug mode is enabled
+    if debug_mode:
+        nii_files = [path for path in nii_files if os.path.basename(path) == debug_scan_name]
+        if not nii_files:
+            print(f"ERROR: Debug scan '{debug_scan_name}' not found in {Processed_scans_dir}")
+            return
+        print(f"\n{'='*60}")
+        print(f"DEBUG MODE ENABLED - Processing only: {debug_scan_name}")
+        print(f"{'='*60}\n")
+    
     print(f"\nFound {len(nii_files)} scans to process")
     
     if len(nii_files) == 0:
@@ -499,6 +641,17 @@ def process_scans():
         with open(json_file, "w") as f:
             json.dump(json_data, f, indent=2)
         
+        # Print predicted landmark locations to console
+        print(f"\n📍 Predicted Landmark Locations:")
+        print(f"{'='*60}")
+        for lm_id in landmark_ids:
+            coords_mm = landmark_locations_world[lm_id]
+            coords_vx = landmark_voxel_pred[lm_id]
+            print(f"Landmark {lm_id}:")
+            print(f"  World (mm): ({coords_mm[0]:8.3f}, {coords_mm[1]:8.3f}, {coords_mm[2]:8.3f})")
+            print(f"  Voxel:      ({coords_vx[0]:3d}, {coords_vx[1]:3d}, {coords_vx[2]:3d})")
+        print(f"{'='*60}\n")
+        
         # Store for CSV
         prediction_row = {'scan_name': scan_name}
         for lm_id in landmark_ids:
@@ -517,8 +670,119 @@ def process_scans():
         try:
             # Prepare landmarks array (all 6 landmarks: 8-13)
             all_landmarks = np.array([landmark_locations_world[lm_id] for lm_id in landmark_ids])
-            # Extract landmarks 10-13 (indices 2-5) for plane computation
-            landmarks_for_plane = all_landmarks[2:6]
+            
+            # Choose plane fitting method based on no_eyes configuration
+            if no_eyes:
+                print(f"  No-eyes mode: Using landmarks 10-11 + mandible top points for plane")
+                
+                # Segment craniofacial structures to get mandible
+                segmentation_img, seg_path = segment_craniofacial_structures(
+                    nii_path, scan_landmarks_dir, scan_name
+                )
+                segmentation_data = segmentation_img.get_fdata()
+                
+                # Extract top points of mandible (left and right)
+                left_mandible_top, right_mandible_top = extract_mandible_top_points(
+                    segmentation_data, affine, scan_name
+                )
+                
+                # Create landmarks for plane: lm10, lm11, left_mandible_top, right_mandible_top
+                landmarks_for_plane = np.array([
+                    landmark_locations_world[10],  # lm10
+                    landmark_locations_world[11],  # lm11
+                    left_mandible_top,              # replaces lm12
+                    right_mandible_top              # replaces lm13
+                ])
+                
+                print(f"  Plane landmarks:")
+                print(f"    LM10: {landmarks_for_plane[0]}")
+                print(f"    LM11: {landmarks_for_plane[1]}")
+                print(f"    Left mandible top (pseudo-LM12): {landmarks_for_plane[2]}")
+                print(f"    Right mandible top (pseudo-LM13): {landmarks_for_plane[3]}")
+                
+                # Create visualization of Frankfort plane landmarks
+                print(f"  Creating Frankfort plane landmarks visualization...")
+                fh_plane_vis_path = os.path.join(scan_viz_dir, f"{scan_name}_frankfort_plane_landmarks.png")
+                
+                # Create custom visualization for these 4 points
+                # Use different colors for landmark types
+                plotter = pv.Plotter(shape=(1, 3), off_screen=True, window_size=[2880, 1080])
+                
+                # Create mask points from scan
+                mask_points = np.argwhere(img_tensor.cpu().numpy()[0, 0] > -300).astype(np.float32)
+                
+                landmark_names_fh = ['LM10', 'LM11', 'L-Mandible (LM12)', 'R-Mandible (LM13)']
+                colors_fh = ['yellow', 'orange', 'cyan', 'magenta']
+                
+                views = [
+                    ('Axial (Top-Down)', 'xy', 0),
+                    ('Sagittal (Side)', 'yz', 90),
+                    ('Coronal (Front)', 'xz', 0)
+                ]
+                
+                for idx, (title, view, azimuth) in enumerate(views):
+                    plotter.subplot(0, idx)
+                    
+                    # Add scan points as point cloud
+                    grid = pv.PolyData(mask_points)
+                    plotter.add_mesh(grid, color='lightgray', opacity=0.2, point_size=2)
+                    
+                    # Add each Frankfort plane landmark
+                    for i, (landmark, name, color) in enumerate(zip(landmarks_for_plane, landmark_names_fh, colors_fh)):
+                        sphere = pv.Sphere(radius=4, center=landmark)
+                        plotter.add_mesh(sphere, color=color, label=name if idx == 2 else None)
+                        
+                        # Add text label
+                        plotter.add_point_labels(
+                            [landmark], 
+                            [name], 
+                            font_size=18, 
+                            text_color=color,
+                            point_size=1,
+                            shape_opacity=0,
+                            bold=True
+                        )
+                    
+                    # Add legend only to last subplot
+                    if idx == 2:
+                        plotter.add_legend(bcolor='white', face='rectangle', size=(0.25, 0.25))
+                    
+                    # Set camera position
+                    plotter.camera_position = view
+                    if azimuth != 0:
+                        plotter.camera.azimuth = azimuth
+                    plotter.camera.zoom(1.3)
+                    
+                    # Add title
+                    plotter.add_text(title, position='upper_edge', font_size=14, color='black')
+                
+                # Save screenshot
+                plotter.screenshot(fh_plane_vis_path)
+                plotter.close()
+                
+                print(f"  ✓ Frankfort plane landmarks visualization saved to {fh_plane_vis_path}")
+                
+                # Record mandible segmentation in transform JSON
+                transform_data["transformations"].append({
+                    "step": "9b",
+                    "operation": "craniofacial_segmentation",
+                    "parameters": {
+                        "task": "craniofacial_structures",
+                        "reference": "Wasserthal et al. (2023) TotalSegmentator: Robust Segmentation of 104 Anatomic Structures in CT Images. Radiology: Artificial Intelligence. https://doi.org/10.1148/ryai.230024",
+                        "structures": ["mandible", "teeth_lower", "skull", "head", "sinus_maxillary", "sinus_frontal", "teeth_upper"],
+                        "mandible_points": {
+                            "left_top_mm": [float(x) for x in left_mandible_top],
+                            "right_top_mm": [float(x) for x in right_mandible_top]
+                        }
+                    },
+                    "output_file": seg_path,
+                    "visualization": fh_plane_vis_path
+                })
+                
+            else:
+                # Standard mode: Extract landmarks 10-13 (indices 2-5) for plane computation
+                print(f"  Standard mode: Using landmarks 10-13 for Frankfort plane")
+                landmarks_for_plane = all_landmarks[2:6]
             
             # Get mask points (threshold = 0 for resampled scans)
             mask_points = np.argwhere(img_tensor.cpu().numpy()[0, 0] > 0).astype(np.float32)
@@ -537,20 +801,23 @@ def process_scans():
             print(f"  Rotation applied (degrees): {angles}")
             print(f"  Z-axis rotation: {z_rotation_angle:.2f}°")
             
-            # Check if visualization is needed (angle > 10 degrees)
-            rotation_threshold = 10.0
-            needs_visualization = abs(z_rotation_angle) > rotation_threshold
+            # Always create visualization of predicted landmarks
+            print(f"  Creating landmark visualization...")
+            vis_path = os.path.join(scan_viz_dir, f"{scan_name}_landmarks_visualization.png")
+            visualize_landmarks_with_scan(
+                img_tensor.cpu().numpy()[0, 0], 
+                all_landmarks, 
+                vis_path, 
+                threshold=-300
+            )
+            print(f"  ✓ Visualization saved to {vis_path}")
             
-            if needs_visualization:
-                print(f"  ⚠️  Large rotation detected ({abs(z_rotation_angle):.2f}°)! Creating visualization...")
-                vis_path = os.path.join(scan_viz_dir, f"{scan_name}_large_rotation_vis.png")
-                visualize_landmarks_with_scan(
-                    img_tensor.cpu().numpy()[0, 0], 
-                    all_landmarks, 
-                    vis_path, 
-                    threshold=-300
-                )
-                
+            # Check if large rotation should be flagged (angle > 10 degrees)
+            rotation_threshold = 10.0
+            needs_flagging = abs(z_rotation_angle) > rotation_threshold
+            
+            if needs_flagging:
+                print(f"  ⚠️  Large rotation detected ({abs(z_rotation_angle):.2f}°)!")
                 # Add to flagged scans
                 flagged_scans.append({
                     'scan_name': scan_name,
@@ -609,11 +876,18 @@ def process_scans():
                     "aligned_world_mm": [float(x) for x in aligned_landmarks[i]]
                 }
             
+            # Determine alignment method description
+            if no_eyes:
+                alignment_method_desc = "Frankfort plane (landmarks 10-11 + mandible top points)"
+            else:
+                alignment_method_desc = "Frankfort plane (landmarks 10-13)"
+            
             transform_data["transformations"].append({
                 "step": 10,
                 "operation": "frankfort_plane_alignment",
                 "parameters": {
-                    "alignment_method": "Frankfort plane (landmarks 10-13)",
+                    "alignment_method": alignment_method_desc,
+                    "no_eyes_mode": no_eyes,
                     "original_plane_normal": [float(x) for x in orig_normal],
                     "target_plane_normal": [float(x) for x in corrected_normal],
                     "rotation_center_mm": [float(x) for x in center],
@@ -622,7 +896,7 @@ def process_scans():
                     "z_rotation_angle_degrees": float(z_rotation_angle),
                     "interpolation_order": 1,
                     "fill_value": -1000,
-                    "flagged_for_review": bool(needs_visualization)
+                    "flagged_for_review": bool(needs_flagging)
                 },
                 "aligned_landmarks": aligned_landmarks_dict,
                 "output_files": {
@@ -734,6 +1008,10 @@ if __name__ == "__main__":
     print(f"Model path: {landmark_detection_model_path}")
     print(f"Output directory: {output_dir}")
     print(f"Landmarks to detect: {landmark_ids}")
+    print(f"No-eyes mode: {no_eyes}")
+    if no_eyes:
+        print(f"  → Using mandible top points instead of eye landmarks (12-13)")
+        print(f"  → Reference: Wasserthal et al. (2023) TotalSegmentator")
     print(f"{'='*60}\n")
     
     process_scans()
