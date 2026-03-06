@@ -17,9 +17,9 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)  
 
-Raw_scans_dir = r"/projects/oticon/erhdata/Raw/EarScans/Images/HECKTOR 2025 Training Data/Task 1"
-Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Processed_data"
-output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output"
+Raw_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Raw"
+Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
+output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output"
 output_img_dir = os.path.join(output_dir, "visualization_images")
 output_transform_dir = os.path.join(output_dir, "transform_logs")
 os.makedirs(output_img_dir, exist_ok=True)
@@ -28,7 +28,11 @@ os.makedirs(output_transform_dir, exist_ok=True)
 acceptable_patientid_csv= r"/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/acceptable_patientid.csv"
 
 # Quality assessment filter
-pre_quality_assessed = True  # Set to True to only process scans in acceptable_patientid_csv
+pre_quality_assessed = False  # Set to True to only process scans in acceptable_patientid_csv
+
+# Debug mode - process only one specific scan
+debug_mode = False  # Set to False to process all scans
+debug_scan_name = "sub01_pituitary__CT.nii.gz"  # Specific scan to process in debug mode
 
 voxel_threshold = (1.5, 1.5, 3.5)
 intensity_clip_range = (-1000, 2007)
@@ -323,12 +327,136 @@ def process_single_scan(scan_path):
             "output_file": shifted_path
         })
         
-        # ---- Step 7: Pad to 540x540x540 ----
-        print("Padding to 540x540x540...")
+        # ---- Step 7: Standardize orientation to match reference (LAS orientation) ----
+        print("Checking and standardizing orientation...")
         shifted_nib = nib.load(shifted_path)
         shifted_data = shifted_nib.get_fdata()
         shifted_affine = shifted_nib.affine
         shifted_header = shifted_nib.header
+        
+        # Target orientation: negative X, negative Y, positive Z (like old scans)
+        target_signs = np.array([-1, -1, 1])
+        
+        # Get current signs from diagonal of affine
+        current_affine_diagonal = np.diag(shifted_affine[:3, :3])
+        current_signs = np.sign(current_affine_diagonal)
+        
+        print(f"  Current affine diagonal: {current_affine_diagonal}")
+        print(f"  Current signs: {current_signs}")
+        print(f"  Target signs: {target_signs}")
+        
+        # Check if orientation needs correction
+        needs_flip = ~np.isclose(current_signs, target_signs)
+        
+        print(f"  Needs flip: {needs_flip}")
+        
+        if np.any(needs_flip):
+            print(f"  Orientation correction needed for axes: {np.where(needs_flip)[0].tolist()}")
+            
+            # Apply flips to data
+            corrected_data = shifted_data.copy()
+            for axis in range(3):
+                if needs_flip[axis]:
+                    print(f"  Flipping axis {axis}")
+                    corrected_data = np.flip(corrected_data, axis=axis)
+            
+            # Create a standardized affine matrix with target orientation
+            corrected_affine = np.eye(4)
+            for axis in range(3):
+                # Get the spacing magnitude from the original affine
+                spacing_magnitude = abs(shifted_affine[axis, axis])
+                # Apply the target sign
+                corrected_affine[axis, axis] = target_signs[axis] * spacing_magnitude
+            # Origin remains at (0, 0, 0)
+            corrected_affine[3, 3] = 1.0
+            
+            # Save orientation-corrected image
+            corrected_img = nib.Nifti1Image(corrected_data, corrected_affine, shifted_header)
+            orientation_corrected_path = os.path.join(patient_output_dir, f"{patient_id}_CT_orientation_corrected.nii.gz")
+            nib.save(corrected_img, orientation_corrected_path)
+            
+            print(f"  Orientation corrected and saved to: {orientation_corrected_path}")
+            print(f"  New affine diagonal: {np.diag(corrected_affine[:3, :3])}")
+            
+            # Create comparison visualization
+            print("  Creating orientation correction comparison visualization...")
+            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+            
+            # Middle slices
+            z_slice = shifted_data.shape[2] // 2
+            x_slice = shifted_data.shape[0] // 2
+            y_slice = shifted_data.shape[1] // 2
+            
+            # Original (uncorrected)
+            axes[0, 0].imshow(shifted_data[:, :, z_slice], cmap='gray')
+            axes[0, 0].set_title(f'Original Axial (Z={z_slice})')
+            axes[0, 0].axis('off')
+            
+            axes[0, 1].imshow(shifted_data[x_slice, :, :].T, cmap='gray', origin='lower')
+            axes[0, 1].set_title(f'Original Sagittal (X={x_slice})')
+            axes[0, 1].axis('off')
+            
+            axes[0, 2].imshow(shifted_data[:, y_slice, :].T, cmap='gray', origin='lower')
+            axes[0, 2].set_title(f'Original Coronal (Y={y_slice})')
+            axes[0, 2].axis('off')
+            
+            # Corrected
+            axes[1, 0].imshow(corrected_data[:, :, z_slice], cmap='gray')
+            axes[1, 0].set_title(f'Corrected Axial (Z={z_slice})')
+            axes[1, 0].axis('off')
+            
+            axes[1, 1].imshow(corrected_data[x_slice, :, :].T, cmap='gray', origin='lower')
+            axes[1, 1].set_title(f'Corrected Sagittal (X={x_slice})')
+            axes[1, 1].axis('off')
+            
+            axes[1, 2].imshow(corrected_data[:, y_slice, :].T, cmap='gray', origin='lower')
+            axes[1, 2].set_title(f'Corrected Coronal (Y={y_slice})')
+            axes[1, 2].axis('off')
+            
+            plt.suptitle(f"Orientation Correction: Original vs Corrected\nFlipped axes: {np.where(needs_flip)[0].tolist()}")
+            plt.tight_layout()
+            comparison_path = os.path.join(output_img_dir, f"{patient_id}_orientation_correction.png")
+            plt.savefig(comparison_path)
+            plt.close()
+            print(f"  Comparison saved to: {comparison_path}")
+            
+            # Record orientation correction in transform JSON
+            transform_data["transformations"].append({
+                "step": 7,
+                "operation": "orientation_standardization",
+                "parameters": {
+                    "target_orientation": "LAS (Left-Anterior-Superior)",
+                    "target_signs": [int(x) for x in target_signs],
+                    "original_signs": [float(x) for x in current_signs],
+                    "axes_flipped": [int(x) for x in np.where(needs_flip)[0]],
+                    "original_affine_matrix": [[float(x) for x in row] for row in shifted_affine],
+                    "corrected_affine_matrix": [[float(x) for x in row] for row in corrected_affine]
+                },
+                "output_file": orientation_corrected_path
+            })
+            
+            # Use corrected data and affine for subsequent steps
+            shifted_data = corrected_data
+            shifted_affine = corrected_affine
+        else:
+            print("  Orientation already correct - no flip needed.")
+            
+            # Record that no correction was needed
+            transform_data["transformations"].append({
+                "step": 7,
+                "operation": "orientation_standardization",
+                "parameters": {
+                    "target_orientation": "LAS (Left-Anterior-Superior)",
+                    "target_signs": [int(x) for x in target_signs],
+                    "original_signs": [float(x) for x in current_signs],
+                    "axes_flipped": [],
+                    "correction_needed": False
+                },
+                "output_file": shifted_path
+            })
+        
+        # ---- Step 8: Pad to 540x540x540 ----
+        print("Padding to 540x540x540...")
         
         target_shape = (540, 540, 540)
         pad_width = [(0, max(0, target_shape[i] - shifted_data.shape[i])) for i in range(3)]
@@ -340,7 +468,7 @@ def process_single_scan(scan_path):
         
         # Record padding in transform JSON
         transform_data["transformations"].append({
-            "step": 7,
+            "step": 8,
             "operation": "padding",
             "parameters": {
                 "original_dimensions": [int(x) for x in shifted_data.shape],
@@ -351,7 +479,7 @@ def process_single_scan(scan_path):
             "output_file": padded_path
         })
         
-        # ---- Step 8: Resample to 256x256x256 ----
+        # ---- Step 9: Resample to 256x256x256 ----
         print("Resampling to 256x256x256...")
         resample_shape = (256, 256, 256)
         zoom_factors = [resample_shape[i] / padded_data.shape[i] for i in range(3)]
@@ -368,7 +496,7 @@ def process_single_scan(scan_path):
         
         # Record final resampling in transform JSON
         transform_data["transformations"].append({
-            "step": 8,
+            "step": 9,
             "operation": "final_resampling",
             "parameters": {
                 "original_dimensions": [int(x) for x in padded_data.shape],
@@ -413,6 +541,16 @@ def main():
         for file in files:
             if file.endswith('__CT.nii.gz'):
                 scan_paths.append(os.path.join(root, file))
+    
+    # Filter scans if debug mode is enabled
+    if debug_mode:
+        scan_paths = [path for path in scan_paths if os.path.basename(path) == debug_scan_name]
+        if not scan_paths:
+            print(f"ERROR: Debug scan '{debug_scan_name}' not found in {Raw_scans_dir}")
+            return
+        print(f"\n{'='*60}")
+        print(f"DEBUG MODE ENABLED - Processing only: {debug_scan_name}")
+        print(f"{'='*60}\n")
     
     print(f"Found {len(scan_paths)} scans to process.")
     print(f"\n{'='*60}")
