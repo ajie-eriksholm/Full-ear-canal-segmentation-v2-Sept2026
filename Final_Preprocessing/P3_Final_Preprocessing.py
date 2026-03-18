@@ -13,12 +13,16 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 # Configuration
-Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Processed_data"
-output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output"
+Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
+Processed_data_output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data_no_alignment"
+output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output_no_alignment"
 output_transform_dir = os.path.join(output_dir, "transform_logs")
 Aligned_landmarks_dir = os.path.join(output_dir, "Aligned_Landmarks")
-excluded_scans_csv= r"/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Excluded_scans_cropping.csv"
+Landmarks_dir = os.path.join(output_dir, "Landmarks")  # Predicted (non-aligned) landmarks from P2
+excluded_scans_csv= r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Excluded_scans_cropping.csv"
 
+no_eyes = False
+skip_alignment = False 
 # Landmark configuration
 landmark_ids = [8, 9, 10, 11, 12, 13]
 
@@ -204,25 +208,39 @@ def process_scans():
         print("Proceeding without exclusion filter.")
     print()
     
-    # Find all aligned scans
+    # List to collect transformed landmark positions for CSV export
+    landmark_records = []
+    
+    # Find all scans to process
+    # When skip_alignment=True, use the original resampled scans; otherwise use aligned scans
     aligned_scans = []
-    for root, dirs, files in os.walk(Processed_scans_dir):
-        for file in files:
-            if file.endswith('_aligned.nii.gz'):
-                aligned_scans.append(os.path.join(root, file))
+    if skip_alignment:
+        scan_suffix = '_CT_resampled_256.nii.gz'
+        for root, dirs, files in os.walk(Processed_scans_dir):
+            for file in files:
+                if file.endswith(scan_suffix):
+                    aligned_scans.append(os.path.join(root, file))
+        print(f"skip_alignment=True: using resampled scans (*{scan_suffix})")
+    else:
+        scan_suffix = '_aligned.nii.gz'
+        for root, dirs, files in os.walk(Processed_scans_dir):
+            for file in files:
+                if file.endswith(scan_suffix):
+                    aligned_scans.append(os.path.join(root, file))
+        print(f"skip_alignment=False: using aligned scans (*{scan_suffix})")
     
     aligned_scans = sorted(aligned_scans)
-    print(f"Found {len(aligned_scans)} aligned scans to process\n")
+    print(f"Found {len(aligned_scans)} scans to process\n")
     
     if len(aligned_scans) == 0:
-        print("No aligned scans found. Please run P2 first.")
+        print("No scans found. Please run P2 first.")
         return
     
     # Process each scan
     for aligned_scan_path in tqdm(aligned_scans, desc="Processing scans"):
         # Extract scan name
         filename = os.path.basename(aligned_scan_path)
-        scan_name = filename.replace('_aligned.nii.gz', '')
+        scan_name = filename.replace(scan_suffix, '')
         
         # Check if scan is in excluded list
         if scan_name in excluded_patient_ids:
@@ -235,29 +253,46 @@ def process_scans():
         print(f"Processing: {scan_name}")
         print(f"{'='*60}")
         
-        # Load aligned scan
-        print(f"Loading aligned scan from {aligned_scan_path}")
+        # Load scan
+        print(f"Loading scan from {aligned_scan_path}")
         aligned_img = nib.load(aligned_scan_path)
         aligned_data = aligned_img.get_fdata()
         affine = aligned_img.affine
         
-        # Load aligned landmarks
-        landmark_file = os.path.join(Aligned_landmarks_dir, f"{scan_name}_lm_aligned.npy")
-        if not os.path.exists(landmark_file):
-            print(f"ERROR: Aligned landmarks not found: {landmark_file}")
-            print(f"Skipping {scan_name}")
-            continue
-        
-        print(f"Loading aligned landmarks from {landmark_file}")
-        aligned_landmarks = np.load(landmark_file)  # Shape: (6, 3)
+        # Load landmarks
+        if skip_alignment:
+            # Load predicted landmarks (8-11) from P2 JSON output
+            landmark_file = os.path.join(Landmarks_dir, scan_name, "predicted_landmarks.json")
+            if not os.path.exists(landmark_file):
+                print(f"ERROR: Predicted landmarks not found: {landmark_file}")
+                print(f"Skipping {scan_name}")
+                continue
+            print(f"Loading predicted landmarks from {landmark_file}")
+            with open(landmark_file) as f:
+                lm_json = json.load(f)
+            # Build array ordered by landmark_ids; set missing landmarks (12, 13) to zeros
+            aligned_landmarks = np.zeros((len(landmark_ids), 3))
+            for i, lm_id in enumerate(landmark_ids):
+                if str(lm_id) in lm_json['landmarks']:
+                    aligned_landmarks[i] = lm_json['landmarks'][str(lm_id)]['world_mm']
+        else:
+            # Load aligned landmarks from P2 NPY output
+            landmark_file = os.path.join(Aligned_landmarks_dir, f"{scan_name}_lm_aligned.npy")
+            if not os.path.exists(landmark_file):
+                print(f"ERROR: Aligned landmarks not found: {landmark_file}")
+                print(f"Skipping {scan_name}")
+                continue
+            print(f"Loading aligned landmarks from {landmark_file}")
+            aligned_landmarks = np.load(landmark_file)  # Shape: (6, 3)
         
         # Initialize transform logging
         transform_data = initialize_transform_json(
             aligned_scan_path, scan_name, aligned_data.shape, affine, step_number=11
         )
         
-        # Create output directory for this scan
-        patient_dir = os.path.dirname(aligned_scan_path)
+        # Create output directory for this scan under Processed_Data_no_alignment
+        patient_dir = os.path.join(Processed_data_output_dir, scan_name)
+        os.makedirs(patient_dir, exist_ok=True)
         
         # Process each landmark to crop
         for lm_idx, lm_id, lm_name, offset_mm, is_left_ear in LANDMARKS_TO_CROP:
@@ -389,6 +424,45 @@ def process_scans():
                     "output_file": origin_reset_path
                 })
                 
+                # === Compute transformed landmark positions for CSV ===
+                voxel_spacing = np.array([np.abs(affine[i, i]) for i in range(3)])
+                # Right ear: landmarks 8, 10, 12; Left ear: landmarks 9, 11, 13
+                ear_landmark_ids = [8, 10, 12] if lm_id == 10 else [9, 11, 13]
+                for li, lid in enumerate(landmark_ids):
+                    if lid not in ear_landmark_ids:
+                        continue
+                    # If no_eyes, set landmarks 12 and 13 to None
+                    if no_eyes and lid in [12, 13]:
+                        landmark_records.append({
+                            "scan_name": scan_name,
+                            "ear_side": lm_name,
+                            "landmark_id": int(lid),
+                            "x_mm": None,
+                            "y_mm": None,
+                            "z_mm": None
+                        })
+                        continue
+                    lm_world_pos = aligned_landmarks[li]
+                    # Voxel coords in the original aligned volume
+                    lm_voxel_orig = world_to_voxel(lm_world_pos, affine)
+                    # Voxel coords in the cropped volume
+                    lm_voxel_cropped = lm_voxel_orig - roi_start.astype(float)
+                    # Mirror x-axis for left ear
+                    if lm_id == 11:
+                        lm_voxel_cropped[MIRROR_AXIS] = (ROI_SIZE[MIRROR_AXIS] - 1) - lm_voxel_cropped[MIRROR_AXIS]
+                    # Convert to mm using origin-reset affine (origin=0, so mm = voxel * spacing)
+                    lm_mm = lm_voxel_cropped * voxel_spacing
+                    # Check if landmark falls inside the ROI
+                    inside = all(0 <= lm_voxel_cropped[ax] < ROI_SIZE[ax] for ax in range(3))
+                    landmark_records.append({
+                        "scan_name": scan_name,
+                        "ear_side": lm_name,
+                        "landmark_id": int(lid),
+                        "x_mm": -float(lm_mm[0]),
+                        "y_mm": -float(lm_mm[1]),
+                        "z_mm": float(lm_mm[2])
+                    })
+                
             except Exception as e:
                 print(f"  ERROR: Failed to crop ROI for landmark {lm_id}")
                 print(f"  Error: {e}")
@@ -418,6 +492,14 @@ def process_scans():
             print(f"\n  WARNING: Failed to save transform JSON: {e}")
         
         print(f"\n✓ Completed {scan_name}")
+    
+    # Save transformed landmark positions to CSV
+    if landmark_records:
+        landmarks_csv_path = os.path.join(Aligned_landmarks_dir, "landmark_positions_after_cropping.csv")
+        landmarks_df = pd.DataFrame(landmark_records)
+        landmarks_df.to_csv(landmarks_csv_path, index=False)
+        print(f"\nLandmark positions saved to: {landmarks_csv_path}")
+        print(f"Total landmark entries: {len(landmark_records)}")
     
     # Final summary
     print(f"\n{'='*60}")

@@ -25,7 +25,7 @@ if parent_dir not in sys.path:
 # Configuration
 Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
 landmark_detection_model_path = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/best_model_2025-12-05_13-16-35.pth"
-output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output"
+output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output_no_alignment"
 output_transform_dir = os.path.join(output_dir, "transform_logs")
 
 # Debug mode - process only one specific scan
@@ -33,7 +33,8 @@ debug_mode = False  # Set to False to process all scans
 debug_scan_name = "sub01_pituitary_CT_resampled_256.nii.gz"  # Specific scan to process in debug mode
 
 # No eyes mode - use mandible segmentation instead of eye landmarks for plane fitting
-no_eyes = True  # Set to True if scans don't include eyes (uses mandible top points instead of landmarks 12-13)
+no_eyes = False  # Set to True if scans don't include eyes (uses mandible top points instead of landmarks 12-13)
+skip_alignment = False  # Set to True to skip alignment step (useful for testing landmark detection only)
 
 # Device configuration
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -466,6 +467,11 @@ def visualize_with_pyvista(scan_path, landmarks_world, landmarks_voxel, affine, 
 
 
 # === Main Processing Pipeline ===
+class _AlignmentSkipped(Exception):
+    """Raised intentionally when skip_alignment=True to exit the alignment try-block cleanly."""
+    pass
+
+
 def process_scans():
     """Main function to process all scans with landmark detection."""
     
@@ -666,8 +672,18 @@ def process_scans():
         all_predictions.append(prediction_row)
         
         # === Scan Alignment ===
-        print(f"\nAligning scan {scan_name} based on Frankfort plane...")
         try:
+            if skip_alignment:
+                print(f"  skip_alignment=True — skipping Frankfort plane alignment for {scan_name}")
+                transform_data["transformations"].append({
+                    "step": 10,
+                    "operation": "frankfort_plane_alignment",
+                    "status": "SKIPPED",
+                    "reason": "skip_alignment=True"
+                })
+                raise _AlignmentSkipped(scan_name)
+
+            print(f"\nAligning scan {scan_name} based on Frankfort plane...")
             # Prepare landmarks array (all 6 landmarks: 8-13)
             all_landmarks = np.array([landmark_locations_world[lm_id] for lm_id in landmark_ids])
             
@@ -905,6 +921,8 @@ def process_scans():
                 }
             })
             
+        except _AlignmentSkipped:
+            pass  # skip_alignment=True — alignment intentionally skipped
         except Exception as e:
             print(f"ERROR: Alignment failed for {scan_name}")
             print(f"Error type: {type(e).__name__}")
