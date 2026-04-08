@@ -5,6 +5,7 @@ import nibabel as nib
 import torch
 import csv
 import json
+import argparse
 from datetime import datetime
 from tqdm import tqdm
 import pyvista as pv
@@ -22,7 +23,7 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-# Configuration
+# Default configuration (can be overridden by command-line arguments)
 Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
 landmark_detection_model_path = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/best_model_2025-12-05_13-16-35.pth"
 output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output_no_alignment"
@@ -36,8 +37,30 @@ debug_scan_name = "sub01_pituitary_CT_resampled_256.nii.gz"  # Specific scan to 
 no_eyes = False  # Set to True if scans don't include eyes (uses mandible top points instead of landmarks 12-13)
 skip_alignment = False  # Set to True to skip alignment step (useful for testing landmark detection only)
 
-# Device configuration
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# Device configuration - check for GPU compatibility
+def get_device():
+    """Determine the best available device, checking GPU compatibility."""
+    if torch.cuda.is_available():
+        try:
+            # Check GPU compute capability (PyTorch 2.x requires >= 7.0)
+            major, minor = torch.cuda.get_device_capability()
+            compute_capability = float(f"{major}.{minor}")
+            if compute_capability >= 7.0:
+                print(f"GPU detected and compatible - using CUDA (compute capability: {compute_capability})")
+                return torch.device('cuda')
+            else:
+                print(f"GPU compute capability {compute_capability} < 7.0 (required by PyTorch 2.x)")
+                print("Falling back to CPU")
+                return torch.device('cpu')
+        except Exception as e:
+            print(f"Error checking GPU compatibility: {e}")
+            print("Falling back to CPU")
+            return torch.device('cpu')
+    else:
+        print("No GPU available - using CPU")
+        return torch.device('cpu')
+
+DEVICE = get_device()
 
 # Landmark configuration
 landmark_ids = [8, 9, 10, 11, 12, 13]
@@ -241,9 +264,12 @@ def segment_craniofacial_structures(input_path, output_dir, scan_name):
     """
     print(f"  Running TotalSegmentator for craniofacial structures...")
     
+    # Determine device for segmentation
+    seg_device = 'gpu' if DEVICE.type == 'cuda' else 'cpu'
+    
     # Run totalsegmentator with craniofacial task
     # Available structures: mandible, teeth_lower, skull, head, sinus_maxillary, sinus_frontal, teeth_upper
-    segmentation_img = totalsegmentator(input_path, task='craniofacial_structures')
+    segmentation_img = totalsegmentator(input_path, task='craniofacial_structures', device=seg_device)
     
     if segmentation_img is None:
         raise ValueError("Craniofacial segmentation failed or returned no output.")
@@ -1017,7 +1043,47 @@ def process_scans():
     print(f"{'='*60}\n")
 
 
+# === Argument Parser ===
+def parse_arguments():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description='P2 Preprocessing: Landmark detection and alignment',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument('--processed_scans_dir', type=str,
+                        default=r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data",
+                        help='Directory containing processed scans from P1')
+    parser.add_argument('--output_dir', type=str,
+                        default=r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output_no_alignment",
+                        help='Directory for outputs (logs, landmarks)')
+    parser.add_argument('--landmark_model', type=str,
+                        default=r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/best_model_2025-12-05_13-16-35.pth",
+                        help='Path to landmark detection model')
+    parser.add_argument('--no_eyes', type=str, default='False',
+                        choices=['True', 'False'],
+                        help='Use mandible top points instead of eye landmarks')
+    parser.add_argument('--skip_alignment', type=str, default='False',
+                        choices=['True', 'False'],
+                        help='Skip alignment step (landmark detection only)')
+    
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    # Parse command-line arguments
+    args = parse_arguments()
+    
+    # Update global variables with command-line arguments
+    Processed_scans_dir = args.processed_scans_dir
+    output_dir = args.output_dir
+    landmark_detection_model_path = args.landmark_model
+    no_eyes = (args.no_eyes == 'True')
+    skip_alignment = (args.skip_alignment == 'True')
+    
+    # Update derived paths
+    output_transform_dir = os.path.join(output_dir, "transform_logs")
+    
     print(f"\n{'='*60}")
     print(f"LANDMARK DETECTION PIPELINE - P2 Final Preprocessing")
     print(f"{'='*60}")
@@ -1030,6 +1096,7 @@ if __name__ == "__main__":
     if no_eyes:
         print(f"  → Using mandible top points instead of eye landmarks (12-13)")
         print(f"  → Reference: Wasserthal et al. (2023) TotalSegmentator")
+    print(f"Skip alignment: {skip_alignment}")
     print(f"{'='*60}\n")
     
     process_scans()

@@ -6,6 +6,7 @@ import nibabel as nib
 import pandas as pd
 from scipy import ndimage
 from skimage import measure
+import argparse
 
 # === Configuration ===
 FH_plane_lm = "/projects/oticon/erhdata/Processed-Data/AJIE/tcia/all/Output/Aligned_Landmarks/landmark_positions_after_cropping.csv"
@@ -207,5 +208,43 @@ def main():
     process_masks()
 
 
+def parse_arguments():
+    """Parse command-line arguments to override configuration."""
+    parser = argparse.ArgumentParser(
+        description='Generate markup JSONs, NIfTI masks, and STL files from inference outputs',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument('--fh_plane_lm', type=str, default=None,
+                        help='Path to FH plane landmarks CSV (overrides FH_plane_lm)')
+    parser.add_argument('--predicted_landmarks', type=str, default=None,
+                        help='Path to predicted canal landmarks CSV (overrides predicted_landmarks)')
+    parser.add_argument('--masks_dir', type=str, default=None,
+                        help='Directory containing predicted segmentation masks (overrides masks_dir)')
+    parser.add_argument('--output_dir_markups', type=str, default=None,
+                        help='Output directory for markup JSONs with FH (overrides output_dir_markups)')
+    parser.add_argument('--output_dir_markups_no_fh', type=str, default=None,
+                        help='Output directory for markup JSONs without FH (overrides output_dir_markups_no_fh)')
+    parser.add_argument('--output_dir_masks', type=str, default=None,
+                        help='Output directory for NIfTI masks (overrides output_dir_masks)')
+    parser.add_argument('--output_dir_stl', type=str, default=None,
+                        help='Output directory for STL files (overrides output_dir_stl)')
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = parse_arguments()
+    if args.fh_plane_lm is not None:
+        FH_plane_lm = args.fh_plane_lm
+    if args.predicted_landmarks is not None:
+        predicted_landmarks = args.predicted_landmarks
+    if args.masks_dir is not None:
+        masks_dir = args.masks_dir
+    if args.output_dir_markups is not None:
+        output_dir_markups = args.output_dir_markups
+    if args.output_dir_markups_no_fh is not None:
+        output_dir_markups_no_fh = args.output_dir_markups_no_fh
+    if args.output_dir_masks is not None:
+        output_dir_masks = args.output_dir_masks
+    if args.output_dir_stl is not None:
+        output_dir_stl = args.output_dir_stl
     main()

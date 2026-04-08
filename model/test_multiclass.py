@@ -1,11 +1,11 @@
 import os
 import numpy as np
 import nibabel as nib
-import nrrd
 import torch
 import torch.nn as nn
 import pandas as pd
 from tqdm import tqdm
+import argparse
 
 # ============================================================
 # CONFIGURATION
@@ -23,7 +23,31 @@ OUTPUT_PREDICTIONS_DIR_TEMPLATE = "/projects/oticon/erhdata/Processed-Data/SBEO/
 
 NUM_LANDMARKS = 7  # Number of heatmap channels
 LANDMARK_IDS = [1, 2, 3, 4, 5, 6, 7]  # Landmark IDs
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Device configuration - check for GPU compatibility
+def get_device():
+    """Determine the best available device, checking GPU compatibility."""
+    if torch.cuda.is_available():
+        try:
+            # Check GPU compute capability (PyTorch 2.x requires >= 7.0)
+            major, minor = torch.cuda.get_device_capability()
+            compute_capability = float(f"{major}.{minor}")
+            if compute_capability >= 7.0:
+                print(f"GPU detected and compatible - using CUDA (compute capability: {compute_capability})")
+                return torch.device('cuda')
+            else:
+                print(f"GPU compute capability {compute_capability} < 7.0 (required by PyTorch 2.x)")
+                print("Falling back to CPU")
+                return torch.device('cpu')
+        except Exception as e:
+            print(f"Error checking GPU compatibility: {e}")
+            print("Falling back to CPU")
+            return torch.device('cpu')
+    else:
+        print("No GPU available - using CPU")
+        return torch.device('cpu')
+
+DEVICE = get_device()
 
 # Model configurations: (run_name, architecture_type, base_features, seg_channels)
 MODEL_CONFIGS = [
@@ -315,8 +339,8 @@ def run_inference_single_model(run_name, architecture_type, base_features, seg_c
     print(f"Found {len(ct_files)} test CT scans\n")
     
     if len(ct_files) == 0:
-        print("No CT files found in test directory!")
-        return
+        print(f"No CT files found in test directory: {TEST_DIR}")
+        raise FileNotFoundError(f"No CT files found in {TEST_DIR}")
     
     # Process each CT scan
     successful = 0
@@ -492,10 +516,37 @@ def run_inference():
             str(result['failed'])
         ))
     print("#"*80 + "\n")
+    
+    # Fail if all models errored
+    all_failed = all(r['failed'] == 'ERROR' for r in overall_results)
+    if all_failed:
+        raise RuntimeError("All model inference runs failed")
 
 
 # ============================================================
 # MAIN
 # ============================================================
+def parse_arguments():
+    """Parse command-line arguments to override configuration."""
+    parser = argparse.ArgumentParser(
+        description='Run inference using trained 3D U-Net models',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument('--test_dir', type=str, default=None,
+                        help='Directory containing test ear volumes (overrides TEST_DIR)')
+    parser.add_argument('--model_path_template', type=str, default=None,
+                        help='Template path for model checkpoints, with {} for run name (overrides MODEL_PATH_TEMPLATE)')
+    parser.add_argument('--output_predictions_dir_template', type=str, default=None,
+                        help='Template path for output predictions, with {} for run name (overrides OUTPUT_PREDICTIONS_DIR_TEMPLATE)')
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = parse_arguments()
+    if args.test_dir is not None:
+        TEST_DIR = args.test_dir
+    if args.model_path_template is not None:
+        MODEL_PATH_TEMPLATE = args.model_path_template
+    if args.output_predictions_dir_template is not None:
+        OUTPUT_PREDICTIONS_DIR_TEMPLATE = args.output_predictions_dir_template
     run_inference()

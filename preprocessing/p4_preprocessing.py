@@ -1,12 +1,14 @@
 import os
 import numpy as np
 import nibabel as nib
+import argparse
 from scipy import ndimage
 from pathlib import Path
 from tqdm import tqdm
 
 # upsampling and normalization 
 
+# Default configuration (can be overridden by command-line arguments)
 PROCESS_DATA_DIR = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
 OUTPUT_DATA_DIR = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output/Inference_Scans"
 
@@ -126,11 +128,15 @@ def process_all_participants():
     # Create output directory if it doesn't exist
     os.makedirs(OUTPUT_DATA_DIR, exist_ok=True)
     
+    # Centralized cropped ears directory from P3
+    cropped_ears_dir = os.path.join(os.path.dirname(OUTPUT_DATA_DIR), "Final_Cropped_Ears_256")
+    
     # Get all participant folders
     participant_folders = [f for f in os.listdir(PROCESS_DATA_DIR) 
                           if os.path.isdir(os.path.join(PROCESS_DATA_DIR, f))]
     
-    print(f"Found {len(participant_folders)} participant folders\n")
+    print(f"Found {len(participant_folders)} participant folders")
+    print(f"Centralized cropped ears dir: {cropped_ears_dir}\n")
     
     # Track statistics
     total_processed = 0
@@ -148,31 +154,38 @@ def process_all_participants():
         print(f"{'='*80}")
         
         # Look for left and right ear scans
-        left_ear_pattern = f"{patient_id}_left_ear_cropped_mirrored_origin_reset.nii.gz"
-        right_ear_pattern = f"{patient_id}_right_ear_cropped_origin_reset.nii.gz"
+        # Try per-patient dir first (long names), then centralized dir (short names)
+        left_ear_candidates = [
+            os.path.join(participant_path, f"{patient_id}_left_ear_cropped_mirrored_origin_reset.nii.gz"),
+            os.path.join(cropped_ears_dir, f"{patient_id}_left_ear.nii.gz"),
+        ]
+        right_ear_candidates = [
+            os.path.join(participant_path, f"{patient_id}_right_ear_cropped_origin_reset.nii.gz"),
+            os.path.join(cropped_ears_dir, f"{patient_id}_right_ear.nii.gz"),
+        ]
         
-        left_ear_path = os.path.join(participant_path, left_ear_pattern)
-        right_ear_path = os.path.join(participant_path, right_ear_pattern)
+        left_ear_path = next((p for p in left_ear_candidates if os.path.exists(p)), None)
+        right_ear_path = next((p for p in right_ear_candidates if os.path.exists(p)), None)
         
         # Process left ear
-        if os.path.exists(left_ear_path):
+        if left_ear_path:
             success = process_scan(left_ear_path, OUTPUT_DATA_DIR, patient_id, 'left')
             if success:
                 total_processed += 1
             else:
                 total_failed += 1
         else:
-            print(f"  ⚠ Left ear scan not found: {left_ear_pattern}")
+            print(f"  Warning: Left ear scan not found for {patient_id}")
         
         # Process right ear
-        if os.path.exists(right_ear_path):
+        if right_ear_path:
             success = process_scan(right_ear_path, OUTPUT_DATA_DIR, patient_id, 'right')
             if success:
                 total_processed += 1
             else:
                 total_failed += 1
         else:
-            print(f"  ⚠ Right ear scan not found: {right_ear_pattern}")
+            print(f"  Warning: Right ear scan not found for {patient_id}")
     
     # Final summary
     print("\n" + "="*80)
@@ -184,5 +197,30 @@ def process_all_participants():
     print("="*80 + "\n")
 
 
+# === Argument Parser ===
+def parse_arguments():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description='P4 Preprocessing: Upsampling and normalization for inference',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument('--processed_scans_dir', type=str,
+                        default=r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data",
+                        help='Directory containing processed scans')
+    parser.add_argument('--output_dir', type=str,
+                        default=r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output",
+                        help='Base output directory')
+    
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    # Parse command-line arguments
+    args = parse_arguments()
+    
+    # Update global variables with command-line arguments
+    PROCESS_DATA_DIR = args.processed_scans_dir
+    OUTPUT_DATA_DIR = os.path.join(args.output_dir, "Inference_Scans")
+    
     process_all_participants()

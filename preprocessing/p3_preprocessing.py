@@ -3,6 +3,7 @@ import sys
 import numpy as np
 import nibabel as nib
 import json
+import argparse
 from datetime import datetime
 from tqdm import tqdm
 import pandas as pd
@@ -12,7 +13,7 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-# Configuration
+# Default configuration (can be overridden by command-line arguments)
 Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
 Processed_data_output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data_no_alignment"
 output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output_no_alignment"
@@ -511,7 +512,50 @@ def process_scans():
     print(f"{'='*60}\n")
 
 
+# === Argument Parser ===
+def parse_arguments():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description='P3 Preprocessing: ROI cropping around ear landmarks',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument('--processed_scans_dir', type=str,
+                        default=r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data",
+                        help='Directory containing processed scans')
+    parser.add_argument('--output_dir', type=str,
+                        default=r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output_no_alignment",
+                        help='Directory for outputs (logs, landmarks, cropped ears)')
+    parser.add_argument('--excluded_scans_csv', type=str,
+                        default=r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Excluded_scans_cropping.csv",
+                        help='CSV file with excluded scans')
+    parser.add_argument('--no_eyes', type=str, default='False',
+                        choices=['True', 'False'],
+                        help='No eyes mode (must match P2 setting)')
+    parser.add_argument('--skip_alignment', type=str, default='False',
+                        choices=['True', 'False'],
+                        help='Skip alignment mode (must match P2 setting)')
+    
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    # Parse command-line arguments
+    args = parse_arguments()
+    
+    # Update global variables with command-line arguments
+    Processed_scans_dir = args.processed_scans_dir
+    output_dir = args.output_dir
+    excluded_scans_csv = args.excluded_scans_csv
+    no_eyes = (args.no_eyes == 'True')
+    skip_alignment = (args.skip_alignment == 'True')
+    
+    # Update derived paths
+    Processed_data_output_dir = os.path.join(os.path.dirname(Processed_scans_dir), "Processed-Data_no_alignment")
+    output_transform_dir = os.path.join(output_dir, "transform_logs")
+    Aligned_landmarks_dir = os.path.join(output_dir, "Aligned_Landmarks")
+    Landmarks_dir = os.path.join(output_dir, "Landmarks")
+    
     print(f"\n{'='*60}")
     print(f"ROI CROPPING PIPELINE - P3 Final Preprocessing")
     print(f"{'='*60}")

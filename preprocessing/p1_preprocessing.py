@@ -6,6 +6,7 @@ import nibabel as nib
 import SimpleITK as sitk
 import csv
 import json
+import argparse
 from datetime import datetime
 from scipy.ndimage import zoom
 import torch
@@ -17,13 +18,12 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)  
 
+# Default configuration (can be overridden by command-line arguments)
 Raw_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Raw"
 Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
 output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output"
 output_img_dir = os.path.join(output_dir, "visualization_images")
 output_transform_dir = os.path.join(output_dir, "transform_logs")
-os.makedirs(output_img_dir, exist_ok=True)
-os.makedirs(output_transform_dir, exist_ok=True)
 
 acceptable_patientid_csv= r"/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/acceptable_patientid.csv"
 
@@ -80,7 +80,27 @@ def clip_intensity(data, clip_range):
     return np.clip(data, clip_range[0], clip_range[1])
 
 def run_segmentation(input_path, patient_output_dir, patient_id):
-    output_img = totalsegmentator(input_path, task='head_glands_cavities')
+    # Check CUDA compute capability to ensure compatibility
+    device = 'cpu'  # Default to CPU
+    if torch.cuda.is_available():
+        # Get GPU compute capability
+        try:
+            major, minor = torch.cuda.get_device_capability()
+            compute_capability = float(f"{major}.{minor}")
+            # PyTorch 2.x requires compute capability >= 7.0
+            if compute_capability >= 7.0:
+                print(f"Using GPU for segmentation (compute capability: {compute_capability})")
+                device = 'gpu'
+            else:
+                print(f"GPU compute capability {compute_capability} < 7.0 (required by PyTorch 2.x)")
+                print("Falling back to CPU for segmentation")
+        except Exception as e:
+            print(f"Error checking GPU compatibility: {e}")
+            print("Falling back to CPU for segmentation")
+    else:
+        print("No GPU available, using CPU for segmentation")
+    
+    output_img = totalsegmentator(input_path, task='head_glands_cavities', device=device)
     if output_img is None:
         raise ValueError("Segmentation failed or returned no output.")
     output_path = os.path.join(patient_output_dir, f"{patient_id}_CT_cavities_segmented.nii.gz")
@@ -519,9 +539,56 @@ def process_single_scan(scan_path):
         print("Done.")
     except Exception as e:
         print(f"Failed to process scan {scan_path}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise  # Re-raise the exception so the script exits with non-zero code
+
+# === Argument Parser ===
+def parse_arguments():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description='P1 Preprocessing: Intensity clipping, segmentation, cropping, and resampling',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument('--raw_scans_dir', type=str, 
+                        default=r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Raw",
+                        help='Directory containing raw scans')
+    parser.add_argument('--processed_scans_dir', type=str,
+                        default=r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data",
+                        help='Directory to save processed scans')
+    parser.add_argument('--output_dir', type=str,
+                        default=r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output",
+                        help='Directory for outputs (logs, visualizations)')
+    parser.add_argument('--acceptable_patientid_csv', type=str,
+                        default=r"/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/acceptable_patientid.csv",
+                        help='CSV file with acceptable patient IDs')
+    parser.add_argument('--pre_quality_assessed', type=str, default='False',
+                        choices=['True', 'False'],
+                        help='Whether to only process scans in acceptable_patientid_csv')
+    
+    return parser.parse_args()
 
 # === Batch Runner ===
 def main():
+    global Raw_scans_dir, Processed_scans_dir, output_dir
+    global output_img_dir, output_transform_dir, acceptable_patientid_csv, pre_quality_assessed
+    
+    # Parse command-line arguments
+    args = parse_arguments()
+    
+    # Update global variables with command-line arguments
+    Raw_scans_dir = args.raw_scans_dir
+    Processed_scans_dir = args.processed_scans_dir
+    output_dir = args.output_dir
+    acceptable_patientid_csv = args.acceptable_patientid_csv
+    pre_quality_assessed = (args.pre_quality_assessed == 'True')
+    
+    # Update derived paths
+    output_img_dir = os.path.join(output_dir, "visualization_images")
+    output_transform_dir = os.path.join(output_dir, "transform_logs")
+    os.makedirs(output_img_dir, exist_ok=True)
+    os.makedirs(output_transform_dir, exist_ok=True)
     # Load acceptable patient IDs if pre-quality assessment is enabled
     acceptable_patient_ids = None
     if pre_quality_assessed:

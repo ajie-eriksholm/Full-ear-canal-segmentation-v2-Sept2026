@@ -29,10 +29,12 @@ BATCH_SIZE = 1
 NUM_WORKERS = 8
 LR = 1e-4
 MAX_EPOCHS = 500
+MAX_TRAINING_TIME_HOURS = 6  # Stop training after 6 hours
 SEED = 12345
 TRAIN_RATIO = 0.85
 NUM_LANDMARKS = 7  # Number of heatmap channels to predict
 LANDMARK_IDS = [1, 2, 3, 4, 5, 6, 7]  # Landmark IDs for tracking
+NUM_SEG_CLASSES = 2  # 0: cavities, 1: tissue
 # Visualization slice for each landmark (None = middle slice, or specify integer)
 HEATMAP_VIZ_SLICE = {
     1: 53,  # Landmark 1: middle slice
@@ -44,12 +46,35 @@ HEATMAP_VIZ_SLICE = {
     7: 51   # Landmark 7: middle slice
 }
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Device configuration - check for GPU compatibility
+def get_device():
+    """Determine the best available device, checking GPU compatibility."""
+    if torch.cuda.is_available():
+        try:
+            # Check GPU compute capability (PyTorch 2.x requires >= 7.0)
+            major, minor = torch.cuda.get_device_capability()
+            compute_capability = float(f"{major}.{minor}")
+            if compute_capability >= 7.0:
+                print(f"GPU detected and compatible - using CUDA (compute capability: {compute_capability})")
+                return torch.device('cuda')
+            else:
+                print(f"GPU compute capability {compute_capability} < 7.0 (required by PyTorch 2.x)")
+                print("Falling back to CPU")
+                return torch.device('cpu')
+        except Exception as e:
+            print(f"Error checking GPU compatibility: {e}")
+            print("Falling back to CPU")
+            return torch.device('cpu')
+    else:
+        print("No GPU available - using CPU")
+        return torch.device('cpu')
+
+DEVICE = get_device()
 
 # ============================================================
 # PATHS (YOUR DIRECTORIES)
 # ============================================================
-CT_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_CTs_resampled_128"
+CT_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_CTs_resampled_128" # CTs already normalized between 0 and 1
 SEG_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Masks_resampled_128"
 HEATMAPS_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Precomputed_Heatmaps_resampled_128_Corrected"
 
@@ -138,7 +163,7 @@ class SegmentationDataset(Dataset):
         image = img.get_fdata(dtype=np.float32)
         affine = img.affine.copy()
 
-        # CT images are already normalized
+        # CTs are already normalized between 0 and 1
         image = torch.from_numpy(image).unsqueeze(0)
 
         # ---------- Load Mask ----------
@@ -161,7 +186,13 @@ class SegmentationDataset(Dataset):
                 mask = mask.T
                 print(f"[INFO] Transposed mask to {mask.shape}")
         
-        mask = torch.from_numpy(mask).float().unsqueeze(0)
+        # Convert binary mask to 2-channel one-hot encoding
+        # Channel 0: cavities (background), Channel 1: tissue (foreground)
+        mask_tensor = torch.from_numpy(mask).float()
+        mask_one_hot = torch.zeros((2,) + mask_tensor.shape, dtype=torch.float32)
+        mask_one_hot[0] = (mask_tensor == 0).float()  # Cavities
+        mask_one_hot[1] = (mask_tensor == 1).float()  # Tissue
+        mask = mask_one_hot
 
         # ---------- Load Heatmaps ----------
         heatmap_name = fname.replace(".nii.gz", "_heatmaps.pt")
@@ -196,7 +227,7 @@ class DoubleConv(nn.Module):
 
 
 class UNet3D(nn.Module):
-    def __init__(self, in_channels=1, seg_channels=1, heatmap_channels=5, base_features=32):
+    def __init__(self, in_channels=1, seg_channels=1, heatmap_channels=5, base_features=48):
         super().__init__()
         f = base_features
         # Shared Encoder
@@ -211,15 +242,16 @@ class UNet3D(nn.Module):
 
         # Shared decoder (high-level features)
         self.dec4 = DoubleConv(f * 16 + f * 8, f * 8)
-        self.dec3 = DoubleConv(f * 8 + f * 4, f * 4)
         
-        # Task-specific decoders (diverge at dec2 level)
+        # Task-specific decoders (diverge at dec3 level for more task-specific capacity)
         # Segmentation branch
+        self.seg_dec3 = DoubleConv(f * 8 + f * 4, f * 4)
         self.seg_dec2 = DoubleConv(f * 4 + f * 2, f * 2)
         self.seg_dec1 = DoubleConv(f * 2 + f, f)
         self.seg_conv = nn.Conv3d(f, seg_channels, kernel_size=1)
         
         # Heatmap branch
+        self.heat_dec3 = DoubleConv(f * 8 + f * 4, f * 4)
         self.heat_dec2 = DoubleConv(f * 4 + f * 2, f * 2)
         self.heat_dec1 = DoubleConv(f * 2 + f, f)
         self.heatmap_conv = nn.Conv3d(f, heatmap_channels, kernel_size=1)
@@ -236,14 +268,14 @@ class UNet3D(nn.Module):
         d4 = self.up(e5)
         d4 = torch.cat([d4, e4], dim=1)
         d4 = self.dec4(d4)
-
-        d3 = self.up(d4)
-        d3 = torch.cat([d3, e3], dim=1)
-        d3 = self.dec3(d3)
         
-        # Task-specific branches (diverge here)
+        # Task-specific branches (diverge here at dec3 level)
         # Segmentation path
-        seg_d2 = self.up(d3)
+        seg_d3 = self.up(d4)
+        seg_d3 = torch.cat([seg_d3, e3], dim=1)
+        seg_d3 = self.seg_dec3(seg_d3)
+        
+        seg_d2 = self.up(seg_d3)
         seg_d2 = torch.cat([seg_d2, e2], dim=1)
         seg_d2 = self.seg_dec2(seg_d2)
         
@@ -253,7 +285,11 @@ class UNet3D(nn.Module):
         seg_out = self.seg_conv(seg_d1)
         
         # Heatmap path
-        heat_d2 = self.up(d3)
+        heat_d3 = self.up(d4)
+        heat_d3 = torch.cat([heat_d3, e3], dim=1)
+        heat_d3 = self.heat_dec3(heat_d3)
+        
+        heat_d2 = self.up(heat_d3)
         heat_d2 = torch.cat([heat_d2, e2], dim=1)
         heat_d2 = self.heat_dec2(heat_d2)
         
@@ -374,6 +410,10 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs, run_dir, 
 
     best_val_loss = float("inf")
     scheduler = ReduceLROnPlateau(optimizer, mode="min", patience=20, factor=0.5)
+    
+    # Track training start time for time-based stopping
+    training_start_time = time.time()
+    max_training_seconds = MAX_TRAINING_TIME_HOURS * 3600
 
     for epoch in range(1, epochs + 1):
         print(f"\nEpoch {epoch}/{epochs}")
@@ -488,18 +528,27 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs, run_dir, 
             # Get middle slice for segmentation visualization
             seg_slice_idx = val_mask.shape[2] // 2
             
-            # Segmentation visualization
+            # Segmentation visualization (show tissue class - channel 1)
             img_slice = val_img[0, :, seg_slice_idx, :].cpu().numpy()  # (D, W)
-            mask_slice = val_mask[0, :, seg_slice_idx, :].cpu().numpy()  # (D, W)
-            seg_pred_slice = seg_pred[0, 0, :, seg_slice_idx, :].cpu().numpy()  # (D, W)
+            mask_tissue_slice = val_mask[1, :, seg_slice_idx, :].cpu().numpy()  # (D, W) - tissue GT
+            seg_pred_tissue_slice = seg_pred[0, 1, :, seg_slice_idx, :].cpu().numpy()  # (D, W) - tissue pred
+            
+            # Also visualize cavity class (channel 0)
+            mask_cavity_slice = val_mask[0, :, seg_slice_idx, :].cpu().numpy()  # (D, W) - cavity GT
+            seg_pred_cavity_slice = seg_pred[0, 0, :, seg_slice_idx, :].cpu().numpy()  # (D, W) - cavity pred
             
             # Enhance contrast for CT image visualization
             img_slice_vis = np.clip(img_slice, 0, 1)
             if img_slice_vis.max() > img_slice_vis.min():
                 img_slice_vis = (img_slice_vis - img_slice_vis.min()) / (img_slice_vis.max() - img_slice_vis.min())
             
-            seg_vis = np.hstack([img_slice_vis, mask_slice, seg_pred_slice])
-            writer.add_image("Val/Segmentation_Image_GT_Pred", seg_vis[None, :, :], epoch, dataformats='CHW')
+            # Tissue visualization (Class 1)
+            tissue_vis = np.hstack([img_slice_vis, mask_tissue_slice, seg_pred_tissue_slice])
+            writer.add_image("Val/Segmentation_Tissue_Image_GT_Pred", tissue_vis[None, :, :], epoch, dataformats='CHW')
+            
+            # Cavity visualization (Class 0)
+            cavity_vis = np.hstack([img_slice_vis, mask_cavity_slice, seg_pred_cavity_slice])
+            writer.add_image("Val/Segmentation_Cavity_Image_GT_Pred", cavity_vis[None, :, :], epoch, dataformats='CHW')
             
             # Heatmap visualization for each landmark (with per-landmark slice selection)
             for i, lm_id in enumerate(landmark_ids):
@@ -535,6 +584,27 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs, run_dir, 
                 'val_heatmap_loss': val_heatmap_loss
             }, os.path.join(run_dir, "best_model.pth"))
             print("✔ Best model saved")
+        
+        # Check if training time limit is reached
+        elapsed_time = time.time() - training_start_time
+        elapsed_hours = elapsed_time / 3600
+        if elapsed_time > max_training_seconds:
+            print(f"\n{'='*80}")
+            print(f"⏰ Training time limit reached: {elapsed_hours:.2f} hours")
+            print(f"Stopping training at epoch {epoch}/{epochs}")
+            # Save final model checkpoint
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'epoch': epoch,
+                'val_loss': val_loss,
+                'val_seg_loss': val_seg_loss,
+                'val_heatmap_loss': val_heatmap_loss,
+                'stopped_early': True,
+                'reason': 'time_limit'
+            }, os.path.join(run_dir, "final_model_time_stopped.pth"))
+            print(f"✔ Final model checkpoint saved")
+            print(f"{'='*80}\n")
+            break
 
     writer.close()
 
@@ -571,9 +641,10 @@ def save_validation_predictions(model, val_dataset, run_dir, device, landmark_id
             seg_pred = torch.sigmoid(seg_pred)
             heatmap_pred = torch.sigmoid(heatmap_pred)
             
-            # Convert to numpy and threshold
-            pred_mask = seg_pred[0, 0].cpu().numpy()
-            pred_mask = (pred_mask > 0.5).astype(np.uint8)
+            # Convert to numpy and get class predictions
+            # For 2-class segmentation, take argmax to get class labels (0=cavity, 1=tissue)
+            seg_probs = seg_pred[0].cpu().numpy()  # (2, D, H, W)
+            pred_mask = np.argmax(seg_probs, axis=0).astype(np.uint8)  # (D, H, W) with values 0 or 1
             
             # Get the original NRRD header to preserve spatial information
             original_header = val_dataset.nrrd_headers.get(fname, None)
@@ -659,7 +730,7 @@ if __name__ == "__main__":
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,
                             num_workers=NUM_WORKERS, pin_memory=True)
 
-    model = UNet3D(in_channels=1, seg_channels=1, heatmap_channels=NUM_LANDMARKS)
+    model = UNet3D(in_channels=1, seg_channels=NUM_SEG_CLASSES, heatmap_channels=NUM_LANDMARKS, base_features=48)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=5e-4)
     loss_fn = CombinedLoss(seg_weight=1.0, heatmap_weight=1.0)
 
@@ -668,7 +739,8 @@ if __name__ == "__main__":
     os.makedirs(run_dir, exist_ok=True)
 
     print("=" * 80)
-    print(f"Training dual-task model: Segmentation + {NUM_LANDMARKS} Landmark Heatmaps")
+    print(f"Training dual-task model: Multi-class Segmentation ({NUM_SEG_CLASSES} classes) + {NUM_LANDMARKS} Landmark Heatmaps")
+    print(f"Segmentation classes: 0=Cavities, 1=Tissue")
     print(f"Landmark IDs: {LANDMARK_IDS}")
     print(f"TensorBoard logs will be saved to: {run_dir}")
     print(f"To visualize, run: tensorboard --logdir={run_dir}")
