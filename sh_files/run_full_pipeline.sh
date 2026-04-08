@@ -222,7 +222,8 @@ echo "=================================================="
 python "$INFERENCE_SCRIPT" \
     --test_dir "$INFERENCE_SCANS_DIR" \
     --model_path_template "$MODEL_PATH_TEMPLATE" \
-    --output_predictions_dir_template "$OUTPUT_PREDICTIONS_DIR_TEMPLATE"
+    --output_predictions_dir_template "$OUTPUT_PREDICTIONS_DIR_TEMPLATE" \
+    --run_names "$POSTPROCESSING_RUN"
 
 if [ $? -ne 0 ]; then
     echo "ERROR: Inference failed!"

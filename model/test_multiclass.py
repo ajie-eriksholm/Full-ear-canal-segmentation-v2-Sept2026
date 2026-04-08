@@ -237,14 +237,12 @@ def preprocess_ct(ct_path):
     # Debug: Check original range
     print(f"  Original image range: [{image.min():.2f}, {image.max():.2f}]")
     
-    # Normalize CT scan to [0, 1] range
-    # Min value: -1000 HU -> 0
-    # Max value: 2007 HU -> 1
-    image = np.clip(image, -1000, 2007)  # Clip to expected HU range
-    image = (image + 1000) / (2007 + 1000)  # Normalize to [0, 1]
+    # Images from P4 are already normalized to [0, 1] range
+    # (clipped to [-1000, 2007] HU then mapped to [0, 1])
+    # No additional normalization needed
     
-    # Debug: Check normalized range
-    print(f"  Normalized image range: [{image.min():.4f}, {image.max():.4f}]")
+    # Debug: Check range
+    print(f"  Image range: [{image.min():.4f}, {image.max():.4f}]")
     
     # Convert to tensor and add batch + channel dimensions
     image_tensor = torch.from_numpy(image).unsqueeze(0).unsqueeze(0)  # (1, 1, D, H, W)
@@ -538,6 +536,8 @@ def parse_arguments():
                         help='Template path for model checkpoints, with {} for run name (overrides MODEL_PATH_TEMPLATE)')
     parser.add_argument('--output_predictions_dir_template', type=str, default=None,
                         help='Template path for output predictions, with {} for run name (overrides OUTPUT_PREDICTIONS_DIR_TEMPLATE)')
+    parser.add_argument('--run_names', type=str, nargs='+', default=None,
+                        help='Run name(s) to evaluate. If provided, only matching models from MODEL_CONFIGS will run.')
     return parser.parse_args()
 
 
@@ -549,4 +549,9 @@ if __name__ == "__main__":
         MODEL_PATH_TEMPLATE = args.model_path_template
     if args.output_predictions_dir_template is not None:
         OUTPUT_PREDICTIONS_DIR_TEMPLATE = args.output_predictions_dir_template
+    if args.run_names is not None:
+        MODEL_CONFIGS = [cfg for cfg in MODEL_CONFIGS if cfg[0] in args.run_names]
+        if not MODEL_CONFIGS:
+            print(f"ERROR: No matching model configs found for run names: {args.run_names}")
+            exit(1)
     run_inference()

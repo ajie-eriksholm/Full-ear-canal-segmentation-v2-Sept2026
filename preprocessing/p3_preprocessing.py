@@ -15,8 +15,8 @@ if parent_dir not in sys.path:
 
 # Default configuration (can be overridden by command-line arguments)
 Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
-Processed_data_output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data_no_alignment"
-output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output_no_alignment"
+Processed_data_output_dir = Processed_scans_dir
+output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output"
 output_transform_dir = os.path.join(output_dir, "transform_logs")
 Aligned_landmarks_dir = os.path.join(output_dir, "Aligned_Landmarks")
 Landmarks_dir = os.path.join(output_dir, "Landmarks")  # Predicted (non-aligned) landmarks from P2
@@ -551,7 +551,7 @@ if __name__ == "__main__":
     skip_alignment = (args.skip_alignment == 'True')
     
     # Update derived paths
-    Processed_data_output_dir = os.path.join(os.path.dirname(Processed_scans_dir), "Processed-Data_no_alignment")
+    Processed_data_output_dir = Processed_scans_dir
     output_transform_dir = os.path.join(output_dir, "transform_logs")
     Aligned_landmarks_dir = os.path.join(output_dir, "Aligned_Landmarks")
     Landmarks_dir = os.path.join(output_dir, "Landmarks")
