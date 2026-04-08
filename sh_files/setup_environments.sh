@@ -25,14 +25,15 @@ NC='\033[0m' # No Color
 
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
-# Environment paths
-SEG_ENV="$SCRIPT_DIR/seg_env"
-LANDMARK_ENV="$SCRIPT_DIR/landmark_env"
+# Environment paths (at project root)
+SEG_ENV="$PROJECT_ROOT/seg_env"
+LANDMARK_ENV="$PROJECT_ROOT/landmark_env"
 
-# Requirement files
-SEG_REQ="$SCRIPT_DIR/seg_env_req.txt"
-LANDMARK_REQ="$SCRIPT_DIR/landmark_env_req.txt"
+# Requirement files (in env_req/ folder)
+SEG_REQ="$PROJECT_ROOT/env_req/seg_env_req.txt"
+LANDMARK_REQ="$PROJECT_ROOT/env_req/landmark_env_req.txt"
 
 # ==============================================================================
 # Helper Functions

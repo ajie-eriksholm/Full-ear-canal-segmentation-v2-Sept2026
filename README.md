@@ -12,6 +12,8 @@ This repository contains a complete pipeline for ear canal segmentation and land
 
 ## Quick Start — Run the Full Pipeline
 
+> **First step:** Before running anything, you must install the required environments. See [Environment Setup](#environment-setup) below.
+
 The simplest way to run everything (preprocessing + inference + postprocessing) is with the **unified pipeline script**. All configuration is done in the script header — no need to edit any Python files.
 
 ```bash
@@ -61,7 +63,7 @@ More details for each substep can be found later in this section.
 
 ### Environment Setup
 
-The repository provides **two requirements files** to create **two virtual environments**:
+The repository provides **two requirements files** (in the `env_req/` folder) to create **two virtual environments**:
 
 - `seg_env` — required for **P1** (preprocessing)
 - `landmark_env` — required for **P2, P3, P4** (preprocessing), **inference**, and **postprocessing**
@@ -72,21 +74,21 @@ Use the provided setup script to automatically create both environments:
 
 **Option 1: Bash script (Linux/Mac)**
 ```bash
-./setup_environments.sh
+./sh_files/setup_environments.sh
 ```
 
 **Option 2: Python script (Cross-platform)**
 ```bash
-python setup_environments.py
+python utils/setup_environments.py
 # or
-python3 setup_environments.py
+python3 utils/setup_environments.py
 ```
 
 > **Important:** Run the setup script with your **system Python** (not from within a virtual environment). The script will create the virtual environments for you. If you get "No such file or directory" errors, make sure you're not already in a virtual environment - deactivate it first with `deactivate`.
 
 Both scripts will:
-- Create both virtual environments (`seg_env` and `landmark_env`)
-- Install all required packages from `seg_env_req.txt` and `landmark_env_req.txt`
+- Create both virtual environments (`seg_env` and `landmark_env`) at the project root
+- Install all required packages from `env_req/seg_env_req.txt` and `env_req/landmark_env_req.txt`
 - Handle any existing environments (asks before overwriting)
 - Provide clear progress updates
 
@@ -104,13 +106,13 @@ Alternatively, you can create the environments manually:
 # Create seg_env for P1
 python3 -m venv seg_env
 source seg_env/bin/activate
-pip install -r seg_env_req.txt
+pip install -r env_req/seg_env_req.txt
 deactivate
 
 # Create landmark_env for P2-P4
 python3 -m venv landmark_env
 source landmark_env/bin/activate
-pip install -r landmark_env_req.txt
+pip install -r env_req/landmark_env_req.txt
 deactivate
 ```
 
