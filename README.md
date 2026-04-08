@@ -2,13 +2,23 @@
 
 ## Introduction
 
-This repository contains a complete end-to-end pipeline for **ear canal segmentation** and **anatomical landmark detection** from CT scans. Starting from raw DICOM/NIfTI CT scans of the head, it produces 3D surface meshes (STL) of the ear canal along with anatomical landmark coordinates.
+This repository contains a complete end-to-end pipeline for **ear canal segmentation** and **anatomical landmark detection** from CT scans. Starting from raw NIfTI CT scans of the head, it produces 3D surface meshes (STL) of the ear canal along with anatomical landmark coordinates.
 
 The pipeline consists of three main stages:
 
 1. **Preprocessing (P1-P4)** — Transforms raw CT scans into ear-cropped, orientation-standardized, normalized sub-volumes ready for inference.
 2. **Inference** — Applies trained 3D U-Net models with dual task-specific heads to simultaneously predict ear canal segmentations and anatomical landmarks.
 3. **Postprocessing** — Combines predictions into visualization-ready outputs: JSON markup files (compatible with 3D Slicer), NIfTI segmentation masks, and STL surface meshes.
+
+### Input Requirements
+
+Raw CT scans must be in **NIfTI format** (`.nii.gz`) and placed in a single input folder. Each file must follow the naming convention:
+
+```
+{PatientID}__CT.nii.gz
+```
+
+For example: `Patient001__CT.nii.gz`, `S12345__CT.nii.gz`. The `PatientID` (everything before `__CT.nii.gz`) is used throughout the pipeline to name all intermediate and output files.
 
 ---
 
