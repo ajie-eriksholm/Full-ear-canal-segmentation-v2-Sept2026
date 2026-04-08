@@ -22,7 +22,7 @@ if parent_dir not in sys.path:
 Raw_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Raw"
 Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
 output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output"
-output_img_dir = os.path.join(output_dir, "Logs", "visualization_images")
+output_img_dir = os.path.join(output_dir, "Logs", "P1_head_cropping_visualizations")
 output_transform_dir = os.path.join(output_dir, "Logs", "transform_logs")
 
 acceptable_patientid_csv= r"/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/acceptable_patientid.csv"
@@ -585,7 +585,7 @@ def main():
     pre_quality_assessed = (args.pre_quality_assessed == 'True')
     
     # Update derived paths
-    output_img_dir = os.path.join(output_dir, "Logs", "visualization_images")
+    output_img_dir = os.path.join(output_dir, "Logs", "P1_head_cropping_visualizations")
     output_transform_dir = os.path.join(output_dir, "Logs", "transform_logs")
     os.makedirs(output_img_dir, exist_ok=True)
     os.makedirs(output_transform_dir, exist_ok=True)

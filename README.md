@@ -157,8 +157,8 @@ OUTPUT_DIR/
 │
 └── Logs/                                      # Diagnostic & debug output
     ├── transform_logs/                        # JSON transformation history (P1, P2, P3)
-    ├── visualization_images/                  # Comparison images from P1
-    └── flagged_scans/                         # Scans with large rotations (P2 QC)
+    ├── P1_head_cropping_visualizations/        # Comparison images from P1
+    └── P2_FH_landmark_visualizations/          # FH-plane landmark overlay images (P2)
         └── flagged_large_rotations.csv
 
 PROCESSED_SCANS_DIR/

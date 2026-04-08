@@ -503,7 +503,7 @@ def process_scans():
     
     # Create output directories
     landmarks_output_dir = os.path.join(output_dir, "Preprocessing", "P2_Landmarks", "heatmaps")
-    visualizations_output_dir = os.path.join(output_dir, "Logs", "flagged_scans")
+    visualizations_output_dir = os.path.join(output_dir, "Logs", "P2_FH_landmark_visualizations")
     aligned_landmarks_dir = os.path.join(output_dir, "Preprocessing", "P2_Landmarks")
     aligned_npy_dir = os.path.join(output_dir, "Preprocessing", "P2_Landmarks", "aligned_npy")
     os.makedirs(landmarks_output_dir, exist_ok=True)
@@ -1034,7 +1034,7 @@ def process_scans():
     print(f"  - Heatmaps: {landmarks_output_dir}")
     print(f"  - Aligned NPY: {aligned_npy_dir}")
     print(f"  - Aligned Landmarks: {aligned_landmarks_dir}")
-    print(f"  - Flagged scans: {visualizations_output_dir}")
+    print(f"  - Visualizations: {visualizations_output_dir}")
     print(f"  - Predictions CSV: {csv_file}")
     if all_aligned_landmarks:
         print(f"  - Aligned Landmarks CSV: {aligned_csv_file}")
