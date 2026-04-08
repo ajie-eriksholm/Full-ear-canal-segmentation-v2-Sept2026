@@ -14,10 +14,10 @@ FH_plane_lm = "/projects/oticon/erhdata/Processed-Data/AJIE/tcia/all/Output/Alig
 predicted_landmarks = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Inference_results/run_20260210_105409/test_predictions/predicted_landmark_coordinates.csv"
 masks_dir = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Inference_results/run_20260210_105409/test_predictions"
 
-output_dir_markups = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Test/all_markups"
-output_dir_markups_no_fh = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Test/markups_no_FH"
-output_dir_masks = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Test/all_masks"
-output_dir_stl = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Test/all_stl"
+output_dir_markups = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/markups"
+output_dir_markups_no_fh = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/markups"
+output_dir_masks = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/masks"
+output_dir_stl = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/stl"
 
 # Label mapping for landmarks 1-7 (from predicted_landmark_coordinates.csv)
 CANAL_LABELS = {

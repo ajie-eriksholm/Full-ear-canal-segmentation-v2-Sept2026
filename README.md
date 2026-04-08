@@ -122,38 +122,44 @@ After running the full pipeline, the output directory structure will be:
 
 ```
 OUTPUT_DIR/
-├── transform_logs/                    # JSON logs of all transformations (P1, P2, P3)
-├── visualization_images/              # Visualization images from P1
-├── Landmarks/                         # Predicted landmarks from P2
-│   └── {patient_id}/
-│       ├── predicted_landmarks.txt
-│       ├── predicted_landmarks.json
-│       └── pred_heatmap_landmark*.nii.gz
-├── Aligned_Landmarks/                 # Aligned landmarks (if alignment enabled)
-│   ├── all_landmark_predictions.csv
-│   ├── all_aligned_landmarks.csv
-│   ├── flagged_large_rotations.csv
-│   └── landmark_positions_after_cropping.csv
-├── Final_Cropped_Ears_256/           # Cropped ear ROIs from P3
-│   ├── {patient_id}_left_ear_cropped_mirrored_origin_reset.nii.gz
-│   └── {patient_id}_right_ear_cropped_origin_reset.nii.gz
-├── Inference_Scans/                  # Final normalized scans from P4
-│   ├── {patient_id}_left_ear.nii.gz
-│   └── {patient_id}_right_ear.nii.gz
-├── Inference_Results/                # Model predictions
+├── Preprocessing/
+│   ├── P2_Landmarks/                          # All P2 landmark outputs
+│   │   ├── heatmaps/                          # Per-patient heatmaps & predictions
+│   │   │   └── {patient_id}/
+│   │   │       ├── predicted_landmarks.txt
+│   │   │       ├── predicted_landmarks.json
+│   │   │       └── pred_heatmap_landmark*.nii.gz
+│   │   ├── aligned_npy/                       # Aligned landmark coordinates (.npy)
+│   │   │   └── {patient_id}_lm_aligned.npy
+│   │   ├── all_landmark_predictions.csv       # All detected landmarks
+│   │   ├── all_aligned_landmarks.csv          # Post-alignment positions
+│   │   └── landmark_positions_after_cropping.csv
+│   ├── P3_Cropped_Ears/                       # Cropped ear ROIs from P3
+│   │   ├── {patient_id}_left_ear.nii.gz
+│   │   └── {patient_id}_right_ear.nii.gz
+│   └── P4_Normalized_Ears/                    # Final normalized scans for inference
+│       ├── {patient_id}_left_ear.nii.gz
+│       └── {patient_id}_right_ear.nii.gz
+│
+├── Inference/                                 # Model predictions
 │   └── {run_name}/
 │       └── test_predictions/
 │           ├── predicted_landmark_coordinates.csv
 │           └── {patient_id}_{ear_side}_pred_mask.nii.gz
-└── Postprocessing/                   # Final outputs
-    ├── all_markups/                  # JSON landmark files (with FH plane)
-    │   └── {patient_id}_{ear_side}.json
-    ├── markups_no_FH/                # JSON landmark files (canal only)
-    │   └── {patient_id}_{ear_side}.json
-    ├── all_masks/                    # NIfTI segmentation masks
-    │   └── {patient_id}_{ear_side}_mask.nii.gz
-    └── all_stl/                      # STL surface meshes
-        └── {patient_id}_{ear_side}_canal.stl
+│
+├── Results/                                   # Final user-facing outputs
+│   ├── markups/                               # JSON landmark files (3D Slicer compatible)
+│   │   └── {patient_id}_{ear_side}.json
+│   ├── masks/                                 # NIfTI segmentation masks
+│   │   └── {patient_id}_{ear_side}_mask.nii.gz
+│   └── stl/                                   # STL surface meshes
+│       └── {patient_id}_{ear_side}_canal.stl
+│
+└── Logs/                                      # Diagnostic & debug output
+    ├── transform_logs/                        # JSON transformation history (P1, P2, P3)
+    ├── visualization_images/                  # Comparison images from P1
+    └── flagged_scans/                         # Scans with large rotations (P2 QC)
+        └── flagged_large_rotations.csv
 
 PROCESSED_SCANS_DIR/
 └── {patient_id}/
@@ -288,7 +294,7 @@ Extracts individual ear volumes from aligned scans and ensures both ears have th
 | 11. Right Ear Cropping | Centers a **90×90×90 voxel** ROI at Landmark 10 with offset **[+20, +10, -5] mm**. Pads with -1000 HU. |
 | 12. Left Ear Cropping | Centers a **90×90×90 voxel** ROI at Landmark 11 with offset **[-20, +10, -5] mm**. Pads with -1000 HU. |
 | 13. Left Ear Mirroring | Flips left ear along axis 0 (x-axis) so both ears share the same anatomical orientation. |
-| 14. Origin Reset | Sets origin to (0, 0, 0) for both ears. Saves to patient directory and `Final_Cropped_Ears_256/`. |
+| 14. Origin Reset | Sets origin to (0, 0, 0) for both ears. Saves to patient directory and `Preprocessing/P3_Cropped_Ears/`. |
 
 **Output:** `{PatientID}_right_ear_cropped_origin_reset.nii.gz`, `{PatientID}_left_ear_cropped_mirrored_origin_reset.nii.gz`
 
@@ -307,7 +313,7 @@ Prepares ear volumes for model inference by resampling and normalizing.
 | 15. Upsampling | Resamples to **128×128×128 voxels** using trilinear interpolation. |
 | 16. Intensity Normalization | Clips to [-1000, 2007 HU] and normalizes to **[0, 1]** range. Output: float32. |
 
-**Output:** `{PatientID}_left_ear.nii.gz`, `{PatientID}_right_ear.nii.gz` in `Output/Inference_Scans/`
+**Output:** `{PatientID}_left_ear.nii.gz`, `{PatientID}_right_ear.nii.gz` in `Output/Preprocessing/P4_Normalized_Ears/`
 
 ---
 
@@ -322,9 +328,9 @@ Runs trained 3D U-Net models to generate ear canal segmentation masks and anatom
 ```bash
 source landmark_env/bin/activate
 python model/test_multiclass.py \
-    --test_dir "/path/to/Output/Inference_Scans" \
+    --test_dir "/path/to/Output/Preprocessing/P4_Normalized_Ears" \
     --model_path_template "/path/to/Logs/{}/best_model.pth" \
-    --output_predictions_dir_template "/path/to/Output/Inference_Results/{}/test_predictions" \
+    --output_predictions_dir_template "/path/to/Output/Inference/{}/test_predictions" \
     --run_names "run_20260210_105409"
 ```
 
@@ -375,13 +381,13 @@ Combines inference results with preprocessing landmarks to create visualization-
 ```bash
 source landmark_env/bin/activate
 python postprocessing/markup_comb_stl_generator.py \
-    --fh_plane_lm "/path/to/Output/Aligned_Landmarks/landmark_positions_after_cropping.csv" \
+    --fh_plane_lm "/path/to/Output/Preprocessing/P2_Landmarks/landmark_positions_after_cropping.csv" \
     --predicted_landmarks "/path/to/predictions/predicted_landmark_coordinates.csv" \
     --masks_dir "/path/to/predictions" \
-    --output_dir_markups "/path/to/Output/Postprocessing/all_markups" \
-    --output_dir_markups_no_fh "/path/to/Output/Postprocessing/markups_no_FH" \
-    --output_dir_masks "/path/to/Output/Postprocessing/all_masks" \
-    --output_dir_stl "/path/to/Output/Postprocessing/all_stl"
+    --output_dir_markups "/path/to/Output/Results/markups" \
+    --output_dir_markups_no_fh "/path/to/Output/Results/markups" \
+    --output_dir_masks "/path/to/Output/Results/masks" \
+    --output_dir_stl "/path/to/Output/Results/stl"
 ```
 
 #### What It Does
@@ -399,10 +405,10 @@ python postprocessing/markup_comb_stl_generator.py \
 - Generates binary STL files viewable in 3D Slicer, MeshLab, Blender, etc.
 
 **Output Organization:**
-- With FH plane landmarks → `all_markups/`
-- Without FH plane landmarks → `markups_no_FH/`
-- All masks → `all_masks/`
-- All STL files → `all_stl/`
+- With FH plane landmarks → `Results/markups/`
+- Without FH plane landmarks → `Results/markups/`
+- All masks → `Results/masks/`
+- All STL files → `Results/stl/`
 
 ---
 

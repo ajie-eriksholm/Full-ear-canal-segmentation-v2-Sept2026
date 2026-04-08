@@ -66,12 +66,12 @@ INFERENCE_SCRIPT="$PROJECT_ROOT/model/test_multiclass.py"
 POSTPROCESSING_SCRIPT="$PROJECT_ROOT/postprocessing/markup_comb_stl_generator.py"
 
 # Derived paths
-INFERENCE_SCANS_DIR="$OUTPUT_DIR/Inference_Scans"
-FH_PLANE_LM="$OUTPUT_DIR/Aligned_Landmarks/landmark_positions_after_cropping.csv"
-INFERENCE_OUTPUT_DIR="$OUTPUT_DIR/Inference_Results"
+INFERENCE_SCANS_DIR="$OUTPUT_DIR/Preprocessing/P4_Normalized_Ears"
+FH_PLANE_LM="$OUTPUT_DIR/Preprocessing/P2_Landmarks/landmark_positions_after_cropping.csv"
+INFERENCE_OUTPUT_DIR="$OUTPUT_DIR/Inference"
 PREDICTIONS_DIR="$INFERENCE_OUTPUT_DIR/$POSTPROCESSING_RUN/test_predictions"
 PREDICTED_LANDMARKS_CSV="$PREDICTIONS_DIR/predicted_landmark_coordinates.csv"
-POSTPROCESSING_OUTPUT_DIR="$OUTPUT_DIR/Postprocessing"
+RESULTS_OUTPUT_DIR="$OUTPUT_DIR/Results"
 
 # Inference path templates (using {} as placeholder for run name)
 # Models are loaded from INFERENCE_LOGS_DIR, but predictions are saved under OUTPUT_DIR
@@ -243,17 +243,17 @@ echo "=================================================="
 echo "FH plane landmarks: $FH_PLANE_LM"
 echo "Predicted landmarks: $PREDICTED_LANDMARKS_CSV"
 echo "Masks directory: $PREDICTIONS_DIR"
-echo "Output directory: $POSTPROCESSING_OUTPUT_DIR"
+echo "Output directory: $RESULTS_OUTPUT_DIR"
 echo "=================================================="
 
 python "$POSTPROCESSING_SCRIPT" \
     --fh_plane_lm "$FH_PLANE_LM" \
     --predicted_landmarks "$PREDICTED_LANDMARKS_CSV" \
     --masks_dir "$PREDICTIONS_DIR" \
-    --output_dir_markups "$POSTPROCESSING_OUTPUT_DIR/all_markups" \
-    --output_dir_markups_no_fh "$POSTPROCESSING_OUTPUT_DIR/markups_no_FH" \
-    --output_dir_masks "$POSTPROCESSING_OUTPUT_DIR/all_masks" \
-    --output_dir_stl "$POSTPROCESSING_OUTPUT_DIR/all_stl"
+    --output_dir_markups "$RESULTS_OUTPUT_DIR/markups" \
+    --output_dir_markups_no_fh "$RESULTS_OUTPUT_DIR/markups" \
+    --output_dir_masks "$RESULTS_OUTPUT_DIR/masks" \
+    --output_dir_stl "$RESULTS_OUTPUT_DIR/stl"
 
 if [ $? -ne 0 ]; then
     echo "ERROR: Postprocessing failed!"
@@ -278,12 +278,12 @@ echo "  Output directory:        $OUTPUT_DIR"
 echo ""
 echo "Outputs:"
 echo "  Processed data:          $PROCESSED_SCANS_DIR"
-echo "  Transform logs:          $OUTPUT_DIR/transform_logs"
-echo "  Landmarks:               $OUTPUT_DIR/Landmarks"
-echo "  Cropped ears:            $OUTPUT_DIR/Final_Cropped_Ears_256"
-echo "  Inference scans:         $OUTPUT_DIR/Inference_Scans"
-echo "  Model predictions:       $PREDICTIONS_DIR"
-echo "  Markup JSONs:            $POSTPROCESSING_OUTPUT_DIR/all_markups"
-echo "  NIfTI masks:             $POSTPROCESSING_OUTPUT_DIR/all_masks"
-echo "  STL meshes:              $POSTPROCESSING_OUTPUT_DIR/all_stl"
+echo "  Logs:                    $OUTPUT_DIR/Logs"
+echo "  P2 Landmarks:            $OUTPUT_DIR/Preprocessing/P2_Landmarks"
+echo "  P3 Cropped ears:         $OUTPUT_DIR/Preprocessing/P3_Cropped_Ears"
+echo "  P4 Normalized ears:      $OUTPUT_DIR/Preprocessing/P4_Normalized_Ears"
+echo "  Inference predictions:   $PREDICTIONS_DIR"
+echo "  Markup JSONs:            $RESULTS_OUTPUT_DIR/markups"
+echo "  NIfTI masks:             $RESULTS_OUTPUT_DIR/masks"
+echo "  STL meshes:              $RESULTS_OUTPUT_DIR/stl"
 echo "=================================================="

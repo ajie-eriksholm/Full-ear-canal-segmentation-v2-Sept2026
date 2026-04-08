@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 # Default configuration (can be overridden by command-line arguments)
 PROCESS_DATA_DIR = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
-OUTPUT_DATA_DIR = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output/Inference_Scans"
+OUTPUT_DATA_DIR = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output/Preprocessing/P4_Normalized_Ears"
 
 # Target resolution
 TARGET_SHAPE = (128, 128, 128)
@@ -129,7 +129,7 @@ def process_all_participants():
     os.makedirs(OUTPUT_DATA_DIR, exist_ok=True)
     
     # Centralized cropped ears directory from P3
-    cropped_ears_dir = os.path.join(os.path.dirname(OUTPUT_DATA_DIR), "Final_Cropped_Ears_256")
+    cropped_ears_dir = os.path.join(os.path.dirname(OUTPUT_DATA_DIR), "P3_Cropped_Ears")
     
     # Get all participant folders
     participant_folders = [f for f in os.listdir(PROCESS_DATA_DIR) 
@@ -221,6 +221,6 @@ if __name__ == "__main__":
     
     # Update global variables with command-line arguments
     PROCESS_DATA_DIR = args.processed_scans_dir
-    OUTPUT_DATA_DIR = os.path.join(args.output_dir, "Inference_Scans")
+    OUTPUT_DATA_DIR = os.path.join(args.output_dir, "Preprocessing", "P4_Normalized_Ears")
     
     process_all_participants()

@@ -9,7 +9,7 @@
 #
 # Prerequisites:
 #   - Preprocessing pipeline (P1-P4) must be completed
-#   - Inference scans should be available in OUTPUT_DIR/Inference_Scans/
+#   - Inference scans should be available in OUTPUT_DIR/Preprocessing/P4_Normalized_Ears/
 #
 # Configuration:
 #   Before running, edit the configuration paths in:

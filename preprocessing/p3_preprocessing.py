@@ -17,9 +17,9 @@ if parent_dir not in sys.path:
 Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
 Processed_data_output_dir = Processed_scans_dir
 output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output"
-output_transform_dir = os.path.join(output_dir, "transform_logs")
-Aligned_landmarks_dir = os.path.join(output_dir, "Aligned_Landmarks")
-Landmarks_dir = os.path.join(output_dir, "Landmarks")  # Predicted (non-aligned) landmarks from P2
+output_transform_dir = os.path.join(output_dir, "Logs", "transform_logs")
+Aligned_landmarks_dir = os.path.join(output_dir, "Preprocessing", "P2_Landmarks")
+Landmarks_dir = os.path.join(output_dir, "Preprocessing", "P2_Landmarks", "heatmaps")  # Predicted (non-aligned) landmarks from P2
 excluded_scans_csv= r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Excluded_scans_cropping.csv"
 
 no_eyes = False
@@ -185,7 +185,7 @@ def process_scans():
     print(f"{'='*60}\n")
     
     # Create centralized output directory for final cropped ears
-    final_cropped_ears_dir = os.path.join(output_dir, "Final_Cropped_Ears_256")
+    final_cropped_ears_dir = os.path.join(output_dir, "Preprocessing", "P3_Cropped_Ears")
     os.makedirs(final_cropped_ears_dir, exist_ok=True)
     print(f"Final cropped ears will be saved to: {final_cropped_ears_dir}\n")
     
@@ -278,7 +278,7 @@ def process_scans():
                     aligned_landmarks[i] = lm_json['landmarks'][str(lm_id)]['world_mm']
         else:
             # Load aligned landmarks from P2 NPY output
-            landmark_file = os.path.join(Aligned_landmarks_dir, f"{scan_name}_lm_aligned.npy")
+            landmark_file = os.path.join(Aligned_landmarks_dir, "aligned_npy", f"{scan_name}_lm_aligned.npy")
             if not os.path.exists(landmark_file):
                 print(f"ERROR: Aligned landmarks not found: {landmark_file}")
                 print(f"Skipping {scan_name}")
@@ -552,9 +552,9 @@ if __name__ == "__main__":
     
     # Update derived paths
     Processed_data_output_dir = Processed_scans_dir
-    output_transform_dir = os.path.join(output_dir, "transform_logs")
-    Aligned_landmarks_dir = os.path.join(output_dir, "Aligned_Landmarks")
-    Landmarks_dir = os.path.join(output_dir, "Landmarks")
+    output_transform_dir = os.path.join(output_dir, "Logs", "transform_logs")
+    Aligned_landmarks_dir = os.path.join(output_dir, "Preprocessing", "P2_Landmarks")
+    Landmarks_dir = os.path.join(output_dir, "Preprocessing", "P2_Landmarks", "heatmaps")
     
     print(f"\n{'='*60}")
     print(f"ROI CROPPING PIPELINE - P3 Final Preprocessing")

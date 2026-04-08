@@ -27,7 +27,7 @@ if parent_dir not in sys.path:
 Processed_scans_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Processed-Data"
 landmark_detection_model_path = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/best_model_2025-12-05_13-16-35.pth"
 output_dir = r"/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Output_no_alignment"
-output_transform_dir = os.path.join(output_dir, "transform_logs")
+output_transform_dir = os.path.join(output_dir, "Logs", "transform_logs")
 
 # Debug mode - process only one specific scan
 debug_mode = False  # Set to False to process all scans
@@ -502,14 +502,14 @@ def process_scans():
     """Main function to process all scans with landmark detection."""
     
     # Create output directories
-    landmarks_output_dir = os.path.join(output_dir, "Landmarks")
-    visualizations_output_dir = os.path.join(output_dir, "Visualizations")
-    aligned_scans_dir = os.path.join(output_dir, "Aligned_Scans")
-    aligned_landmarks_dir = os.path.join(output_dir, "Aligned_Landmarks")
+    landmarks_output_dir = os.path.join(output_dir, "Preprocessing", "P2_Landmarks", "heatmaps")
+    visualizations_output_dir = os.path.join(output_dir, "Logs", "flagged_scans")
+    aligned_landmarks_dir = os.path.join(output_dir, "Preprocessing", "P2_Landmarks")
+    aligned_npy_dir = os.path.join(output_dir, "Preprocessing", "P2_Landmarks", "aligned_npy")
     os.makedirs(landmarks_output_dir, exist_ok=True)
     os.makedirs(visualizations_output_dir, exist_ok=True)
-    os.makedirs(aligned_scans_dir, exist_ok=True)
     os.makedirs(aligned_landmarks_dir, exist_ok=True)
+    os.makedirs(aligned_npy_dir, exist_ok=True)
     
     # Load model
     print("Loading landmark detection model...")
@@ -899,7 +899,7 @@ def process_scans():
             aligned_landmarks = rotation.apply(all_landmarks - center) + center
             
             # Save aligned landmarks as .npy in centralized output directory
-            aligned_lm_path = os.path.join(aligned_landmarks_dir, f"{scan_name}_lm_aligned.npy")
+            aligned_lm_path = os.path.join(aligned_npy_dir, f"{scan_name}_lm_aligned.npy")
             np.save(aligned_lm_path, aligned_landmarks)
             print(f"  Aligned landmarks saved to {aligned_lm_path}")
             
@@ -977,7 +977,7 @@ def process_scans():
         print(f"✓ Completed {scan_name}: {len(landmark_locations_world)} landmarks detected and aligned")
     
     # Save CSV with all predictions
-    csv_file = os.path.join(output_dir, "all_landmark_predictions.csv")
+    csv_file = os.path.join(aligned_landmarks_dir, "all_landmark_predictions.csv")
     if all_predictions:
         fieldnames = ['scan_name']
         for lm_id in landmark_ids:
@@ -1011,7 +1011,7 @@ def process_scans():
     
     # Save flagged scans to CSV
     if flagged_scans:
-        flagged_csv_path = os.path.join(output_dir, "flagged_large_rotations.csv")
+        flagged_csv_path = os.path.join(visualizations_output_dir, "flagged_large_rotations.csv")
         flagged_df_data = sorted(flagged_scans, key=lambda x: x['z_rotation_angle_degrees'], reverse=True)
         
         with open(flagged_csv_path, 'w', newline='') as f:
@@ -1031,10 +1031,10 @@ def process_scans():
     print(f"Scans processed: {len(nii_files)}")
     print(f"Total landmarks detected: {len(nii_files) * num_landmarks}")
     print(f"\nOutputs saved to:")
-    print(f"  - Landmarks: {landmarks_output_dir}")
-    print(f"  - Aligned Scans: {aligned_scans_dir}")
+    print(f"  - Heatmaps: {landmarks_output_dir}")
+    print(f"  - Aligned NPY: {aligned_npy_dir}")
     print(f"  - Aligned Landmarks: {aligned_landmarks_dir}")
-    print(f"  - Visualizations (large rotations): {visualizations_output_dir}")
+    print(f"  - Flagged scans: {visualizations_output_dir}")
     print(f"  - Predictions CSV: {csv_file}")
     if all_aligned_landmarks:
         print(f"  - Aligned Landmarks CSV: {aligned_csv_file}")
@@ -1082,7 +1082,7 @@ if __name__ == "__main__":
     skip_alignment = (args.skip_alignment == 'True')
     
     # Update derived paths
-    output_transform_dir = os.path.join(output_dir, "transform_logs")
+    output_transform_dir = os.path.join(output_dir, "Logs", "transform_logs")
     
     print(f"\n{'='*60}")
     print(f"LANDMARK DETECTION PIPELINE - P2 Final Preprocessing")
