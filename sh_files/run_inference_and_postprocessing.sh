@@ -13,8 +13,8 @@
 #
 # Configuration:
 #   Before running, edit the configuration paths in:
-#   - model/test_multiclass.py (inference configuration)
-#   - postprocessing/markup_comb_stl_generator.py (postprocessing configuration)
+#   - model/test_tissue_air.py (inference configuration)
+#   - postprocessing/generate_results.py (postprocessing configuration)
 # ==============================================================================
 
 # ==============================================================================
@@ -33,8 +33,8 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Script locations
-INFERENCE_SCRIPT="$PROJECT_ROOT/model/test_multiclass.py"
-POSTPROCESSING_SCRIPT="$PROJECT_ROOT/postprocessing/markup_comb_stl_generator.py"
+INFERENCE_SCRIPT="$PROJECT_ROOT/model/test_tissue_air.py"
+POSTPROCESSING_SCRIPT="$PROJECT_ROOT/postprocessing/generate_results.py"
 
 # Color codes for output
 RED='\033[0;31m'
@@ -99,7 +99,7 @@ check_file_exists "$POSTPROCESSING_SCRIPT"
 print_success "Postprocessing script found: $POSTPROCESSING_SCRIPT"
 
 # ==============================================================================
-# STEP 1: Run Inference (test_multiclass.py)
+# STEP 1: Run Inference (test_tissue_air.py)
 # ==============================================================================
 
 print_header "STEP 1: Running Model Inference"
@@ -124,7 +124,7 @@ fi
 print_success "Inference completed successfully!"
 
 # ==============================================================================
-# STEP 2: Run Postprocessing (markup_comb_stl_generator.py)
+# STEP 2: Run Postprocessing (generate_results.py)
 # ==============================================================================
 
 print_header "STEP 2: Running Postprocessing"

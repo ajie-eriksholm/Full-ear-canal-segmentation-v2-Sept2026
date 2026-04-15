@@ -97,14 +97,15 @@ def process_scan(input_path, output_path, patient_id, ear_side):
             scale_factor = original_shape[i] / TARGET_SHAPE[i]
             new_affine[i, :3] *= scale_factor
         
-        # Save the processed scan
-        output_filename = f"{patient_id}_{ear_side}_ear.nii.gz"
+        # Save the processed scan with nnU-Net naming convention (_0000 suffix)
+        output_filename = f"{patient_id}_{ear_side}_0000.nii.gz"
         output_filepath = os.path.join(output_path, output_filename)
         
         new_img = nib.Nifti1Image(normalized, new_affine)
         nib.save(new_img, output_filepath)
         
         print(f"    ✓ Saved to: {output_filename}")
+        
         return True
         
     except Exception as e:

@@ -291,6 +291,19 @@ def extract_landmark_centroids(heatmaps, affine, landmark_ids, threshold=0.5):
 # ============================================================
 # INFERENCE
 # ============================================================
+def strip_nnunet_suffix(filename):
+    """Strip the nnU-Net '_0000' channel suffix from a filename.
+    E.g. 'patient_left_0000.nii.gz' -> 'patient_left.nii.gz'
+    """
+    for ext in ['.nii.gz', '.nii']:
+        if filename.endswith(ext):
+            stem = filename[:-len(ext)]
+            if stem.endswith('_0000'):
+                return stem[:-5] + ext
+            return filename
+    return filename
+
+
 def run_inference_single_model(run_name, architecture_type, base_features, seg_channels):
     """Run inference on all test CT scans for a single model."""
     model_path = MODEL_PATH_TEMPLATE.format(run_name)
@@ -373,12 +386,15 @@ def run_inference_single_model(run_name, architecture_type, base_features, seg_c
                 # Convert multi-channel segmentation to single label map using argmax
                 seg_pred_labels = np.argmax(seg_pred_np, axis=0).astype(np.uint8)  # (D, H, W)
                 
+                # Strip _0000 nnU-Net suffix for clean output naming
+                clean_name = strip_nnunet_suffix(ct_file)
+                
                 # Save segmentation mask as NIfTI (preserves exact spatial alignment)
                 # Remove extension and add new suffix
-                if ct_file.endswith('.nii.gz'):
-                    seg_output_name = ct_file[:-7] + '_pred_seg.nii.gz'
+                if clean_name.endswith('.nii.gz'):
+                    seg_output_name = clean_name[:-7] + '_pred_seg.nii.gz'
                 else:
-                    seg_output_name = ct_file[:-4] + '_pred_seg.nii.gz'
+                    seg_output_name = clean_name[:-4] + '_pred_seg.nii.gz'
                 seg_output_path = os.path.join(output_dir, seg_output_name)
                 
                 # Create NIfTI image with same affine as input CT
@@ -386,18 +402,18 @@ def run_inference_single_model(run_name, architecture_type, base_features, seg_c
                 nib.save(seg_nifti, seg_output_path)
                 
                 # Save heatmap predictions as PyTorch tensor
-                if ct_file.endswith('.nii.gz'):
-                    heatmap_output_name = ct_file[:-7] + '_pred_heatmaps.pt'
+                if clean_name.endswith('.nii.gz'):
+                    heatmap_output_name = clean_name[:-7] + '_pred_heatmaps.pt'
                 else:
-                    heatmap_output_name = ct_file[:-4] + '_pred_heatmaps.pt'
+                    heatmap_output_name = clean_name[:-4] + '_pred_heatmaps.pt'
                 heatmap_output_path = os.path.join(output_dir, heatmap_output_name)
                 torch.save(torch.from_numpy(heatmap_pred_np), heatmap_output_path)
                 
                 # Save normalized input CT scan to output directory (the one used for inference)
-                if ct_file.endswith('.nii.gz'):
-                    input_ct_output_name = ct_file[:-7] + '_normalized.nii.gz'
+                if clean_name.endswith('.nii.gz'):
+                    input_ct_output_name = clean_name[:-7] + '_normalized.nii.gz'
                 else:
-                    input_ct_output_name = ct_file[:-4] + '_normalized.nii.gz'
+                    input_ct_output_name = clean_name[:-4] + '_normalized.nii.gz'
                 input_ct_output_path = os.path.join(output_dir, input_ct_output_name)
                 normalized_ct_nifti = nib.Nifti1Image(image_normalized, affine)
                 nib.save(normalized_ct_nifti, input_ct_output_path)
@@ -405,10 +421,10 @@ def run_inference_single_model(run_name, architecture_type, base_features, seg_c
                 # Extract landmark centroids
                 landmark_coords = extract_landmark_centroids(heatmap_pred_np, affine, LANDMARK_IDS)
                 
-                # Store landmark data for CSV
+                # Store landmark data for CSV (use clean name without _0000)
                 for i, lm_id in enumerate(LANDMARK_IDS):
                     landmark_data.append({
-                        'scan_name': ct_file,
+                        'scan_name': clean_name,
                         'landmark_id': lm_id,
                         'x_mm': -landmark_coords[i, 2],
                         'y_mm': landmark_coords[i, 1],

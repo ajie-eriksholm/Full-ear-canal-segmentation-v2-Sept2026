@@ -10,7 +10,7 @@
 #$ -e nnunet_tcia.err
 
 echo "Activating environment..."
-source ~/code/nnunetv2_env/bin/activate
+source ~/Full-ear-canal-segmentation/landmark_env/bin/activate
 
 # ---- PATHS ----
 export nnUNet_raw=/projects/oticon/erhdata/Processed-Data/AJIE/nnunet/nnUNet_raw
@@ -23,7 +23,7 @@ export nnUNet_results=/projects/oticon/erhdata/Processed-Data/AJIE/nnunet/nnUNet
 
 #nnUNetv2_predict -i $nnUNet_raw/Dataset002_Ear/imagesTs -o $nnUNet_results/Dataset002_Ear/predictions_test -d 1 -c 3d_fullres -f 0 1 2 3 4 -chk checkpoint_best.pth
 
-nnUNetv2_predict -i /projects/oticon/erhdata/Processed-Data/AJIE/tcia_corrected/all/Output/Inference_Scans_nnunet/ -o /projects/oticon/erhdata/Processed-Data/AJIE/nnunet/nnUNet_results/Dataset001_Ear/tcia_corrected -d 1 -c 3d_fullres -f 0 1 2 3 4 -chk checkpoint_best.pth
+nnUNetv2_predict -i /projects/oticon/erhdata/Processed-Data/SBEO/test_scan/Output/Preprocessing/P4_Normalized_Ears_nnUNet/ -o /projects/oticon/erhdata/Processed-Data/SBEO/test_scan/Output/Inference/nnUNet/ -d 1 -c 3d_fullres -f 0 1 2 3 4 -chk checkpoint_best.pth -device cpu
 # nnUNetv2_predict \
 #   -i $nnUNet_raw/Dataset002_Ear/imagesTs \
 #   -o $nnUNet_results/Dataset002_Ear/predictions_test \

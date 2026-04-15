@@ -6,6 +6,8 @@ import nibabel as nib
 import pandas as pd
 from scipy import ndimage
 from skimage import measure
+import pyvista as pv
+import vtk as _vtk
 import argparse
 
 # === Configuration ===
@@ -18,6 +20,10 @@ output_dir_markups = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/R
 output_dir_markups_no_fh = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/markups"
 output_dir_masks = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/masks"
 output_dir_stl = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/stl"
+
+bone_masks_dir = ""  # Directory with nnU-Net bone predictions (optional)
+output_dir_masks_bone = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/masks_bone"
+output_dir_stl_bone = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/stl_bone"
 
 # Label mapping for landmarks 1-7 (from predicted_landmark_coordinates.csv)
 CANAL_LABELS = {
@@ -33,12 +39,22 @@ CANAL_LABELS = {
 # FH plane landmark mapping per ear side
 # Maps (ear_side, original_landmark_id) -> (output_id, label)
 FH_LABELS = {
-    ("right_ear", 8):  (8, "Bottom Tragus"),
-    ("right_ear", 10): (9, "Top Tragus"),
-    ("right_ear", 12): (10, "Eye Orbit"),
-    ("left_ear", 9):   (8, "Bottom Tragus"),
-    ("left_ear", 11):  (9, "Top Tragus"),
-    ("left_ear", 13):  (10, "Eye Orbit"),
+    ("right", 8):  (8, "Bottom Tragus"),
+    ("right", 10): (9, "Top Tragus"),
+    ("right", 12): (10, "Eye Orbit"),
+    ("left", 9):   (8, "Bottom Tragus"),
+    ("left", 11):  (9, "Top Tragus"),
+    ("left", 13):  (10, "Eye Orbit"),
+}
+
+# nnU-Net bone segmentation labels
+# 0: background, 1: skull, 2: mandible, 3-6: landmarks (CBJ1-CBJ4)
+BONE_SEG_LABELS = [1, 2]  # skull + mandible (merged as "bone")
+BONE_LANDMARK_LABELS = {
+    3: (11, "CBJ1"),
+    4: (12, "CBJ2"),
+    5: (13, "CBJ3"),
+    6: (14, "CBJ4"),
 }
 
 
@@ -61,6 +77,158 @@ def save_stl_binary(vertices, faces, filepath):
             f.write(struct.pack("<3f", *vertices[face[1]]))
             f.write(struct.pack("<3f", *vertices[face[2]]))
             f.write(b"\x00\x00")  # attribute byte count
+
+
+def nifti_mask_to_block_stl(binary_mask, affine, output_stl_path):
+    """Convert a binary 3D mask into a solid block STL using pyvista.
+
+    Steps:
+      1. Build a pyvista ImageData (voxel grid) from the binary array.
+      2. Threshold to keep only foreground voxels -> solid block geometry.
+      3. Extract the outer surface of those voxels (blocky).
+      4. Apply VTK smoothing (Windowed Sinc + Laplacian) for refinement.
+      5. Save as STL in world coordinates.
+    """
+    # Spacing from affine column norms; origin from translation
+    spacing = np.sqrt((affine[:3, :3] ** 2).sum(axis=0)).astype(float)
+
+    grid = pv.ImageData()
+    grid.dimensions = np.array(binary_mask.shape) + 1  # cell-based: N+1 points per axis
+    grid.spacing = spacing
+    grid.origin = affine[:3, 3]
+    grid.cell_data["mask"] = binary_mask.flatten(order="F").astype(float)
+
+    # Threshold -> solid block cells
+    block = grid.threshold(0.5, scalars="mask")
+    if block.n_cells == 0:
+        print(f"  Warning: block mesh empty, skipping STL.")
+        return False
+
+    # Extract outer surface of the voxel block
+    surface = block.extract_surface()
+
+    # Windowed Sinc smoothing (high quality, aggressive)
+    sinc_smooth = _vtk.vtkWindowedSincPolyDataFilter()
+    sinc_smooth.SetInputData(surface)
+    sinc_smooth.SetNumberOfIterations(50)
+    sinc_smooth.BoundarySmoothingOff()
+    sinc_smooth.FeatureEdgeSmoothingOff()
+    sinc_smooth.SetPassBand(0.01)
+    sinc_smooth.NonManifoldSmoothingOn()
+    sinc_smooth.NormalizeCoordinatesOn()
+    sinc_smooth.Update()
+
+    # Laplacian smoothing for additional refinement
+    laplacian = _vtk.vtkSmoothPolyDataFilter()
+    laplacian.SetInputData(sinc_smooth.GetOutput())
+    laplacian.SetNumberOfIterations(30)
+    laplacian.SetRelaxationFactor(0.5)
+    laplacian.FeatureEdgeSmoothingOff()
+    laplacian.BoundarySmoothingOn()
+    laplacian.Update()
+
+    surface = pv.wrap(laplacian.GetOutput())
+    surface.save(output_stl_path)
+    return True
+
+
+def extract_bone_landmarks(bone_masks_directory):
+    """Extract landmark coordinates from nnU-Net bone segmentation predictions.
+    
+    Labels 3-6 in the nnU-Net output are landmarks. For each, compute the
+    center of mass in world coordinates (mm).
+    
+    Returns:
+        dict: {(patient, ear_side): [(output_id, label, [x,y,z]), ...]}
+    """
+    bone_landmarks = {}
+    if not bone_masks_directory or not os.path.isdir(bone_masks_directory):
+        return bone_landmarks
+
+    nii_files = sorted(f for f in os.listdir(bone_masks_directory) if f.endswith(".nii.gz"))
+    for fname in nii_files:
+        nii = nib.load(os.path.join(bone_masks_directory, fname))
+        data = nii.get_fdata().astype(np.int16)
+        affine = nii.affine
+
+        # Parse patient and ear_side from filename (e.g. "patient_left.nii.gz")
+        base = fname.replace(".nii.gz", "")
+        # Handle nnU-Net output names which may or may not have _0000
+        if base.endswith("_0000"):
+            base = base[:-5]
+        parts = base.rsplit("_", 1)
+        if len(parts) == 2 and parts[1] in ("left", "right"):
+            patient, side = parts
+            ear_side = side  # match tissue CSV key format
+        else:
+            print(f"  Warning: cannot parse patient/side from bone file: {fname}, skipping landmarks")
+            continue
+
+        lm_list = []
+        for lbl, (out_id, label) in BONE_LANDMARK_LABELS.items():
+            lbl_mask = (data == lbl)
+            if not np.any(lbl_mask):
+                continue
+            # Centroid in voxel coordinates — center_of_mass returns (i, j, k)
+            # matching the array axis order from nibabel's get_fdata()
+            com_ijk = np.array(ndimage.center_of_mass(lbl_mask))
+            # The NIfTI affine maps (i, j, k) -> (x, y, z) directly
+            voxel_ijk1 = np.array([com_ijk[0], com_ijk[1], com_ijk[2], 1.0])
+            world = affine @ voxel_ijk1
+            lm_list.append((out_id, label, [float(world[0]), float(world[1]), float(world[2])]))
+
+        if lm_list:
+            bone_landmarks[(patient, ear_side)] = lm_list
+
+    print(f"Extracted bone landmarks for {len(bone_landmarks)} ears")
+    return bone_landmarks
+
+
+def process_bone_masks():
+    """Process nnU-Net bone predictions: merge skull+mandible into binary bone mask,
+    generate NIfTI masks and STL meshes."""
+    if not bone_masks_dir or not os.path.isdir(bone_masks_dir):
+        print("No bone masks directory provided or found, skipping bone mask processing.")
+        return
+
+    os.makedirs(output_dir_masks_bone, exist_ok=True)
+    os.makedirs(output_dir_stl_bone, exist_ok=True)
+
+    nii_files = sorted(f for f in os.listdir(bone_masks_dir) if f.endswith(".nii.gz"))
+    if not nii_files:
+        print("No .nii.gz files found in bone_masks_dir.")
+        return
+
+    processed = 0
+    for fname in nii_files:
+        nii = nib.load(os.path.join(bone_masks_dir, fname))
+        data = nii.get_fdata().astype(np.int16)
+
+        # Merge skull (1) + mandible (2) into binary bone mask
+        bone_binary = np.isin(data, BONE_SEG_LABELS).astype(np.uint8)
+
+        if bone_binary.sum() == 0:
+            print(f"  Warning: no bone voxels in {fname}, skipping.")
+            continue
+
+        # Clean base name (strip _0000 if present)
+        base = fname.replace(".nii.gz", "")
+        if base.endswith("_0000"):
+            base = base[:-5]
+
+        # Save NIfTI mask (keep all components for bone)
+        bone_nii = nib.Nifti1Image(bone_binary, nii.affine, nii.header)
+        nib.save(bone_nii, os.path.join(output_dir_masks_bone, f"{base}.nii.gz"))
+
+        # Generate block STL (pyvista ImageData -> threshold -> extract_surface -> smooth)
+        stl_path = os.path.join(output_dir_stl_bone, f"{base}.stl")
+        if not nifti_mask_to_block_stl(bone_binary, nii.affine, stl_path):
+            continue
+
+        processed += 1
+        print(f"  Processed bone mask: {base}")
+
+    print(f"Processed {processed} bone masks -> NIfTI: '{output_dir_masks_bone}', STL: '{output_dir_stl_bone}'")
 
 
 def process_masks():
@@ -134,14 +302,16 @@ def main():
 
     # --- Load predicted canal landmarks (1-7) ---
     pred_df = pd.read_csv(predicted_landmarks)
-    # scan_name looks like "CHUM-001_left_ear.nii.gz"
+    # scan_name looks like "CHUM-001_left.nii.gz" (after _0000 stripping)
     # Extract patient and ear_side
-    pred_df["patient"] = pred_df["scan_name"].str.replace(".nii.gz", "", regex=False).str.rsplit("_", n=2).str[0]
-    pred_df["ear_side"] = pred_df["scan_name"].str.replace(".nii.gz", "", regex=False).str.rsplit("_", n=2).apply(lambda parts: "_".join(parts[1:]))
+    pred_df["patient"] = pred_df["scan_name"].str.replace(".nii.gz", "", regex=False).str.rsplit("_", n=1).str[0]
+    pred_df["ear_side"] = pred_df["scan_name"].str.replace(".nii.gz", "", regex=False).str.rsplit("_", n=1).str[1]
 
     # --- Load FH plane landmarks (8-13) ---
     if fh_available:
         fh_df = pd.read_csv(FH_plane_lm)
+        # Normalize ear_side: "right_ear" -> "right", "left_ear" -> "left"
+        fh_df["ear_side"] = fh_df["ear_side"].str.replace("_ear", "", regex=False)
         fh_grouped = fh_df.groupby(["scan_name", "ear_side"])
     else:
         fh_grouped = {}  # empty — no FH landmarks will be added
@@ -150,6 +320,9 @@ def main():
     # --- Build JSON per patient ear ---
     # Group predicted landmarks by (patient, ear_side)
     pred_grouped = pred_df.groupby(["patient", "ear_side"])
+
+    # --- Extract bone landmarks from nnU-Net predictions ---
+    bone_landmarks = extract_bone_landmarks(bone_masks_dir)
 
     processed = set()
 
@@ -187,6 +360,15 @@ def main():
                             "position": [float(row["x_mm"]), float(row["y_mm"]), float(row["z_mm"])]
                         })
 
+        # Add bone landmarks (from nnU-Net, labels 3-6)
+        if (patient, ear_side) in bone_landmarks:
+            for out_id, label, position in bone_landmarks[(patient, ear_side)]:
+                landmarks.append({
+                    "id": str(out_id),
+                    "label": label,
+                    "position": position
+                })
+
         # Sort by numeric id
         landmarks.sort(key=lambda lm: int(lm["id"]))
 
@@ -206,6 +388,7 @@ def main():
     print(f"Created {len(processed)} markup JSON files in: {active_markups_dir}")
 
     process_masks()
+    process_bone_masks()
 
 
 def parse_arguments():
@@ -228,6 +411,12 @@ def parse_arguments():
                         help='Output directory for NIfTI masks (overrides output_dir_masks)')
     parser.add_argument('--output_dir_stl', type=str, default=None,
                         help='Output directory for STL files (overrides output_dir_stl)')
+    parser.add_argument('--bone_masks_dir', type=str, default=None,
+                        help='Directory containing nnU-Net bone segmentation predictions')
+    parser.add_argument('--output_dir_masks_bone', type=str, default=None,
+                        help='Output directory for bone NIfTI masks')
+    parser.add_argument('--output_dir_stl_bone', type=str, default=None,
+                        help='Output directory for bone STL files')
     return parser.parse_args()
 
 
@@ -247,4 +436,10 @@ if __name__ == "__main__":
         output_dir_masks = args.output_dir_masks
     if args.output_dir_stl is not None:
         output_dir_stl = args.output_dir_stl
+    if args.bone_masks_dir is not None:
+        bone_masks_dir = args.bone_masks_dir
+    if args.output_dir_masks_bone is not None:
+        output_dir_masks_bone = args.output_dir_masks_bone
+    if args.output_dir_stl_bone is not None:
+        output_dir_stl_bone = args.output_dir_stl_bone
     main()

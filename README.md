@@ -4,11 +4,12 @@
 
 This repository contains a complete end-to-end pipeline for **ear canal segmentation** and **anatomical landmark detection** from CT scans. Starting from raw NIfTI CT scans of the head, it produces 3D surface meshes (STL) of the ear canal along with anatomical landmark coordinates.
 
-The pipeline consists of three main stages:
+The pipeline consists of four main stages:
 
 1. **Preprocessing (P1-P4)** — Transforms raw CT scans into ear-cropped, orientation-standardized, normalized sub-volumes ready for inference.
-2. **Inference** — Applies trained 3D U-Net models with dual task-specific heads to simultaneously predict ear canal segmentations and anatomical landmarks.
-3. **Postprocessing** — Combines predictions into visualization-ready outputs: JSON markup files (compatible with 3D Slicer), NIfTI segmentation masks, and STL surface meshes.
+2. **Tissue vs Air Inference** — Applies trained 3D U-Net models with dual task-specific heads to simultaneously predict ear canal segmentations (tissue vs air) and anatomical landmarks.
+3. **Bone Segmentation Inference** — Applies a trained nnU-Net model to predict bone structures (skull, mandible) and additional landmarks.
+4. **Postprocessing** — Combines predictions into visualization-ready outputs: JSON markup files (compatible with 3D Slicer), NIfTI segmentation masks, and STL surface meshes.
 
 ### Input Requirements
 
@@ -103,7 +104,7 @@ PRE_QUALITY_ASSESSED="False"
 EXCLUDED_SCANS_CSV="/path/to/excluded_scans.csv"
 ```
 
-The script runs all 6 steps automatically (**P1 → P2 → P3 → P4 → Inference → Postprocessing**), activates the correct environment for each step, and stops with a clear error if any step fails.
+The script runs all 7 steps automatically (**P1 → P2 → P3 → P4 → Tissue/Air Inference → Bone Inference → Postprocessing**), activates the correct environment for each step, and stops with a clear error if any step fails.
 
 ### Configuration Options
 
@@ -137,23 +138,29 @@ OUTPUT_DIR/
 │   ├── P3_Cropped_Ears/                       # Cropped ear ROIs from P3
 │   │   ├── {patient_id}_left_ear.nii.gz
 │   │   └── {patient_id}_right_ear.nii.gz
-│   └── P4_Normalized_Ears/                    # Final normalized scans for inference
-│       ├── {patient_id}_left_ear.nii.gz
-│       └── {patient_id}_right_ear.nii.gz
+│   └── P4_Normalized_Ears/                    # Final normalized scans (nnU-Net naming)
+│       ├── {patient_id}_left_0000.nii.gz
+│       └── {patient_id}_right_0000.nii.gz
 │
 ├── Inference/                                 # Model predictions
-│   └── {run_name}/
-│       └── test_predictions/
-│           ├── predicted_landmark_coordinates.csv
-│           └── {patient_id}_{ear_side}_pred_mask.nii.gz
+│   ├── {run_name}/                            # Tissue vs air predictions
+│   │   └── test_predictions/
+│   │       ├── predicted_landmark_coordinates.csv
+│   │       └── {patient_id}_{ear_side}_pred_mask.nii.gz
+│   └── nnUNet/                                # Bone segmentation predictions
+│       └── {patient_id}_{ear_side}.nii.gz
 │
 ├── Results/                                   # Final user-facing outputs
-│   ├── markups/                               # JSON landmark files (3D Slicer compatible)
+│   ├── markups/                               # JSON landmark files (all landmarks combined)
 │   │   └── {patient_id}_{ear_side}.json
-│   ├── masks/                                 # NIfTI segmentation masks
-│   │   └── {patient_id}_{ear_side}_mask.nii.gz
-│   └── stl/                                   # STL surface meshes
-│       └── {patient_id}_{ear_side}_canal.stl
+│   ├── masks/                                 # Tissue vs air NIfTI segmentation masks
+│   │   └── {patient_id}_{ear_side}.nii.gz
+│   ├── stl/                                   # Tissue vs air STL surface meshes
+│   │   └── {patient_id}_{ear_side}.stl
+│   ├── masks_bone/                            # Bone NIfTI masks (skull+mandible)
+│   │   └── {patient_id}_{ear_side}.nii.gz
+│   └── stl_bone/                              # Bone STL surface meshes
+│       └── {patient_id}_{ear_side}.stl
 │
 └── Logs/                                      # Diagnostic & debug output
     ├── transform_logs/                        # JSON transformation history (P1, P2, P3)
@@ -313,11 +320,13 @@ Prepares ear volumes for model inference by resampling and normalizing.
 | 15. Upsampling | Resamples to **128×128×128 voxels** using trilinear interpolation. |
 | 16. Intensity Normalization | Clips to [-1000, 2007 HU] and normalizes to **[0, 1]** range. Output: float32. |
 
-**Output:** `{PatientID}_left_ear.nii.gz`, `{PatientID}_right_ear.nii.gz` in `Output/Preprocessing/P4_Normalized_Ears/`
+**Output:**
+- `{PatientID}_left_0000.nii.gz`, `{PatientID}_right_0000.nii.gz` in `Output/Preprocessing/P4_Normalized_Ears/`
+- Uses nnU-Net `_0000` naming convention so both tissue/air and bone inference read from the same folder
 
 ---
 
-### Inference (`model/test_multiclass.py`)
+### Inference (`model/test_tissue_air.py`)
 
 **Environment:** `landmark_env`
 
@@ -327,7 +336,7 @@ Runs trained 3D U-Net models to generate ear canal segmentation masks and anatom
 
 ```bash
 source landmark_env/bin/activate
-python model/test_multiclass.py \
+python model/test_tissue_air.py \
     --test_dir "/path/to/Output/Preprocessing/P4_Normalized_Ears" \
     --model_path_template "/path/to/Logs/{}/best_model.pth" \
     --output_predictions_dir_template "/path/to/Output/Inference/{}/test_predictions" \
@@ -370,7 +379,89 @@ Use `--run_names` to specify which model(s) to evaluate. Multiple runs can be pa
 
 ---
 
-### Postprocessing (`postprocessing/markup_comb_stl_generator.py`)
+### Bone Segmentation Inference (`model/test_bone.py`)
+
+**Environment:** `landmark_env`
+
+Runs a trained nnU-Net model to predict bone structures (skull, mandible) and 4 additional landmarks from the preprocessed ear volumes. Uses the nnU-Net-formatted scans from P4 (`P4_Normalized_Ears_nnUNet/`).
+
+#### Running Bone Inference Separately
+
+```bash
+source landmark_env/bin/activate
+python model/test_bone.py \
+    --input_dir "/path/to/Output/Preprocessing/P4_Normalized_Ears_nnUNet" \
+    --output_dir "/path/to/Output/Inference/nnUNet"
+```
+
+Additional options:
+
+| Option | Default | Description |
+|---|---|---|
+| `--device` | auto-detect | `cpu` or `cuda`. Auto-detects GPU compatibility (requires CUDA \u2265 7.0). |
+| `--dataset_id` | `1` | nnU-Net dataset ID |
+| `--folds` | `0 1 2 3 4` | Folds to use for ensemble prediction |
+| `--checkpoint` | `checkpoint_best.pth` | Checkpoint file to use |
+| `--trainer` | — | nnU-Net trainer class (e.g., `nnUNetTrainerNoMirroring`) |
+| `--plans` | — | nnU-Net plans name (e.g., `nnUNetResEncUNetLPlans`) |
+
+#### nnU-Net Labels
+
+| ID | Structure |
+|---|---|
+| 0 | Background |
+| 1 | Skull |
+| 2 | Mandible |
+| 3-6 | Landmarks |
+
+#### nnU-Net Data Preparation (`preprocessing/pre_nnunet_heatmaps.py`)
+
+For **training** the nnU-Net model (not needed for inference), use this script to prepare the dataset:
+
+```bash
+python preprocessing/pre_nnunet_heatmaps.py \
+    --cts_dir /path/to/cropped_ears \
+    --masks_dir /path/to/bone_masks \
+    --landmarks_dir /path/to/landmarks \
+    --out_dir /path/to/nnUNet_raw/DatasetXXX_Ear
+```
+
+This creates the `imagesTr/`, `labelsTr/`, and `dataset.json` structure required by nnU-Net, fusing bone segmentation masks with landmark spheres (classes 3-6).
+
+**Output:** `{patient_id}_{side}.nii.gz` bone segmentation predictions in `Output/Inference/nnUNet/`
+
+---
+
+### Evaluation Utilities
+
+Two evaluation scripts are available in `utils/`:
+
+#### Landmark Evaluation (`utils/evaluate_landmarks.py`)
+
+Computes Mean Radial Error (MRE) in mm with detection rates per landmark label.
+
+```bash
+python utils/evaluate_landmarks.py \
+    --gt_dir /path/to/ground_truth_labels \
+    --pred_dir /path/to/predicted_labels \
+    --labels 3 4 5 6 \
+    --output_csv landmark_evaluation.csv
+```
+
+#### Mask Evaluation (`utils/evaluate_masks.py`)
+
+Computes Dice scores between predicted and ground truth segmentation masks.
+
+```bash
+python utils/evaluate_masks.py \
+    --pred_dir /path/to/predictions \
+    --gt_dir /path/to/ground_truth \
+    --label 1
+```
+
+---
+
+### Postprocessing (`postprocessing/generate_results.py`)
 
 **Environment:** `landmark_env`
 
@@ -380,7 +471,7 @@ Combines inference results with preprocessing landmarks to create visualization-
 
 ```bash
 source landmark_env/bin/activate
-python postprocessing/markup_comb_stl_generator.py \
+python postprocessing/generate_results.py \
     --fh_plane_lm "/path/to/Output/Preprocessing/P2_Landmarks/landmark_positions_after_cropping.csv" \
     --predicted_landmarks "/path/to/predictions/predicted_landmark_coordinates.csv" \
     --masks_dir "/path/to/predictions" \

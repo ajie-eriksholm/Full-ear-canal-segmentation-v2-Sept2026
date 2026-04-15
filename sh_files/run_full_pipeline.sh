@@ -13,7 +13,8 @@
 #   P2 (landmark_env) - Landmark detection and Frankfort plane alignment
 #   P3 (landmark_env) - ROI cropping around ear landmarks
 #   P4 (landmark_env) - Upsampling and normalization for inference
-#   Inference          - 3D U-Net segmentation and landmark prediction
+#   Inference Tissue   - 3D U-Net tissue vs air segmentation and landmark prediction
+#   Inference Bone     - nnU-Net bone segmentation
 #   Postprocessing     - Markup JSONs, NIfTI masks, and STL generation
 # ==============================================================================
 
@@ -52,6 +53,12 @@ INFERENCE_LOGS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/
 # will be passed to the postprocessing step)
 POSTPROCESSING_RUN="run_20260210_105409"
 
+# --- nnU-Net configuration (for bone segmentation) ---
+NNUNET_RAW="/projects/oticon/erhdata/Processed-Data/AJIE/nnunet/nnUNet_raw"
+NNUNET_PREPROCESSED="/projects/oticon/erhdata/Processed-Data/AJIE/nnunet/nnUNet_preprocessed"
+NNUNET_RESULTS="/projects/oticon/erhdata/Processed-Data/AJIE/nnunet/nnUNet_results"
+NNUNET_DATASET_ID=1
+
 # ==============================================================================
 # DO NOT EDIT BELOW THIS LINE (unless you know what you're doing)
 # ==============================================================================
@@ -62,11 +69,13 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Script locations
 PREPROCESSING_DIR="$PROJECT_ROOT/preprocessing"
-INFERENCE_SCRIPT="$PROJECT_ROOT/model/test_multiclass.py"
-POSTPROCESSING_SCRIPT="$PROJECT_ROOT/postprocessing/markup_comb_stl_generator.py"
+INFERENCE_SCRIPT="$PROJECT_ROOT/model/test_tissue_air.py"
+BONE_INFERENCE_SCRIPT="$PROJECT_ROOT/model/test_bone.py"
+POSTPROCESSING_SCRIPT="$PROJECT_ROOT/postprocessing/generate_results.py"
 
 # Derived paths
 INFERENCE_SCANS_DIR="$OUTPUT_DIR/Preprocessing/P4_Normalized_Ears"
+BONE_INFERENCE_OUTPUT_DIR="$OUTPUT_DIR/Inference/nnUNet"
 FH_PLANE_LM="$OUTPUT_DIR/Preprocessing/P2_Landmarks/landmark_positions_after_cropping.csv"
 INFERENCE_OUTPUT_DIR="$OUTPUT_DIR/Inference"
 PREDICTIONS_DIR="$INFERENCE_OUTPUT_DIR/$POSTPROCESSING_RUN/test_predictions"
@@ -82,7 +91,7 @@ OUTPUT_PREDICTIONS_DIR_TEMPLATE="$INFERENCE_OUTPUT_DIR/{}/test_predictions"
 # P1: Initial Preprocessing (Clipping, Segmentation, Cropping, Resampling)
 # ==============================================================================
 echo "=================================================="
-echo "STEP 1/6: Running P1 - Initial Preprocessing"
+echo "STEP 1/7: Running P1 - Initial Preprocessing"
 echo "=================================================="
 echo "Activating seg_env for P1..."
 source "$SEG_ENV/bin/activate"
@@ -120,7 +129,7 @@ echo ""
 # P2: Landmark Detection and Alignment
 # ==============================================================================
 echo "=================================================="
-echo "STEP 2/6: Running P2 - Landmark Detection & Alignment"
+echo "STEP 2/7: Running P2 - Landmark Detection & Alignment"
 echo "=================================================="
 echo "Switching to landmark_env for P2-P4..."
 source "$LANDMARK_ENV/bin/activate"
@@ -159,7 +168,7 @@ echo ""
 # P3: ROI Cropping Around Ear Landmarks
 # ==============================================================================
 echo "=================================================="
-echo "STEP 3/6: Running P3 - ROI Cropping"
+echo "STEP 3/7: Running P3 - ROI Cropping"
 echo "=================================================="
 echo "Processed scans directory: $PROCESSED_SCANS_DIR"
 echo "Output directory: $OUTPUT_DIR"
@@ -188,7 +197,7 @@ echo ""
 # P4: Upsampling and Normalization for Inference
 # ==============================================================================
 echo "=================================================="
-echo "STEP 4/6: Running P4 - Upsampling & Normalization"
+echo "STEP 4/7: Running P4 - Upsampling & Normalization"
 echo "=================================================="
 echo "Processed scans directory: $PROCESSED_SCANS_DIR"
 echo "Output directory: $OUTPUT_DIR"
@@ -208,10 +217,10 @@ echo "[OK] P4 preprocessing completed successfully"
 echo ""
 
 # ==============================================================================
-# STEP 5: Model Inference
+# STEP 5: Tissue vs Air Inference
 # ==============================================================================
 echo "=================================================="
-echo "STEP 5/6: Running Inference"
+echo "STEP 5/7: Running Tissue vs Air Inference"
 echo "=================================================="
 echo "Test scans directory: $INFERENCE_SCANS_DIR"
 echo "Model logs directory: $INFERENCE_LOGS_DIR"
@@ -231,18 +240,46 @@ if [ $? -ne 0 ]; then
 fi
 
 echo ""
-echo "[OK] Inference completed successfully"
+echo "[OK] Tissue vs air inference completed successfully"
 echo ""
 
 # ==============================================================================
-# STEP 6: Postprocessing
+# STEP 6: Bone Segmentation Inference (nnU-Net)
 # ==============================================================================
 echo "=================================================="
-echo "STEP 6/6: Running Postprocessing"
+echo "STEP 6/7: Running Bone Segmentation Inference (nnU-Net)"
+echo "=================================================="
+echo "Input scans directory: $INFERENCE_SCANS_DIR"
+echo "Output directory: $BONE_INFERENCE_OUTPUT_DIR"
+echo "=================================================="
+
+python "$BONE_INFERENCE_SCRIPT" \
+    --input_dir "$INFERENCE_SCANS_DIR" \
+    --output_dir "$BONE_INFERENCE_OUTPUT_DIR" \
+    --dataset_id "$NNUNET_DATASET_ID" \
+    --nnunet_raw "$NNUNET_RAW" \
+    --nnunet_preprocessed "$NNUNET_PREPROCESSED" \
+    --nnunet_results "$NNUNET_RESULTS"
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: Bone segmentation inference failed!"
+    exit 1
+fi
+
+echo ""
+echo "[OK] Bone segmentation inference completed successfully"
+echo ""
+
+# ==============================================================================
+# STEP 7: Postprocessing
+# ==============================================================================
+echo "=================================================="
+echo "STEP 7/7: Running Postprocessing"
 echo "=================================================="
 echo "FH plane landmarks: $FH_PLANE_LM"
 echo "Predicted landmarks: $PREDICTED_LANDMARKS_CSV"
 echo "Masks directory: $PREDICTIONS_DIR"
+echo "Bone masks directory: $BONE_INFERENCE_OUTPUT_DIR"
 echo "Output directory: $RESULTS_OUTPUT_DIR"
 echo "=================================================="
 
@@ -253,7 +290,10 @@ python "$POSTPROCESSING_SCRIPT" \
     --output_dir_markups "$RESULTS_OUTPUT_DIR/markups" \
     --output_dir_markups_no_fh "$RESULTS_OUTPUT_DIR/markups" \
     --output_dir_masks "$RESULTS_OUTPUT_DIR/masks" \
-    --output_dir_stl "$RESULTS_OUTPUT_DIR/stl"
+    --output_dir_stl "$RESULTS_OUTPUT_DIR/stl" \
+    --bone_masks_dir "$BONE_INFERENCE_OUTPUT_DIR" \
+    --output_dir_masks_bone "$RESULTS_OUTPUT_DIR/masks_bone" \
+    --output_dir_stl_bone "$RESULTS_OUTPUT_DIR/stl_bone"
 
 if [ $? -ne 0 ]; then
     echo "ERROR: Postprocessing failed!"
@@ -282,8 +322,11 @@ echo "  Logs:                    $OUTPUT_DIR/Logs"
 echo "  P2 Landmarks:            $OUTPUT_DIR/Preprocessing/P2_Landmarks"
 echo "  P3 Cropped ears:         $OUTPUT_DIR/Preprocessing/P3_Cropped_Ears"
 echo "  P4 Normalized ears:      $OUTPUT_DIR/Preprocessing/P4_Normalized_Ears"
-echo "  Inference predictions:   $PREDICTIONS_DIR"
+echo "  Tissue/air predictions:  $PREDICTIONS_DIR"
+echo "  Bone predictions:        $BONE_INFERENCE_OUTPUT_DIR"
 echo "  Markup JSONs:            $RESULTS_OUTPUT_DIR/markups"
 echo "  NIfTI masks:             $RESULTS_OUTPUT_DIR/masks"
 echo "  STL meshes:              $RESULTS_OUTPUT_DIR/stl"
+echo "  Bone NIfTI masks:        $RESULTS_OUTPUT_DIR/masks_bone"
+echo "  Bone STL meshes:         $RESULTS_OUTPUT_DIR/stl_bone"
 echo "=================================================="
