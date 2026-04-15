@@ -432,35 +432,6 @@ This creates the `imagesTr/`, `labelsTr/`, and `dataset.json` structure required
 
 ---
 
-### Evaluation Utilities
-
-Two evaluation scripts are available in `utils/`:
-
-#### Landmark Evaluation (`utils/evaluate_landmarks.py`)
-
-Computes Mean Radial Error (MRE) in mm with detection rates per landmark label.
-
-```bash
-python utils/evaluate_landmarks.py \
-    --gt_dir /path/to/ground_truth_labels \
-    --pred_dir /path/to/predicted_labels \
-    --labels 3 4 5 6 \
-    --output_csv landmark_evaluation.csv
-```
-
-#### Mask Evaluation (`utils/evaluate_masks.py`)
-
-Computes Dice scores between predicted and ground truth segmentation masks.
-
-```bash
-python utils/evaluate_masks.py \
-    --pred_dir /path/to/predictions \
-    --gt_dir /path/to/ground_truth \
-    --label 1
-```
-
----
-
 ### Postprocessing (`postprocessing/generate_results.py`)
 
 **Environment:** `landmark_env`
@@ -496,10 +467,11 @@ python postprocessing/generate_results.py \
 - Generates binary STL files viewable in 3D Slicer, MeshLab, Blender, etc.
 
 **Output Organization:**
-- With FH plane landmarks → `Results/markups/`
-- Without FH plane landmarks → `Results/markups/`
-- All masks → `Results/masks/`
-- All STL files → `Results/stl/`
+- Markup JSONs (all landmarks combined) → `Results/markups/`
+- Tissue vs air NIfTI masks → `Results/masks/`
+- Tissue vs air STL meshes → `Results/stl/`
+- Bone NIfTI masks (skull + mandible) → `Results/masks_bone/`
+- Bone STL meshes → `Results/stl_bone/`
 
 ---
 
