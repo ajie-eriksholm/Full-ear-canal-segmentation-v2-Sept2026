@@ -4,12 +4,13 @@
 
 This repository contains a complete end-to-end pipeline for **ear canal segmentation** and **anatomical landmark detection** from CT scans. Starting from raw NIfTI CT scans of the head, it produces 3D surface meshes (STL) of the ear canal along with anatomical landmark coordinates.
 
-The pipeline consists of four main stages:
+The pipeline consists of five main stages:
 
 1. **Preprocessing (P1-P4)** — Transforms raw CT scans into ear-cropped, orientation-standardized, normalized sub-volumes ready for inference.
 2. **Tissue vs Air Inference** — Applies trained 3D U-Net models with dual task-specific heads to simultaneously predict ear canal segmentations (tissue vs air) and anatomical landmarks.
 3. **Bone Segmentation Inference** — Applies a trained nnU-Net model to predict bone structures (skull, mandible) and additional landmarks.
 4. **Postprocessing** — Combines predictions into visualization-ready outputs: JSON markup files (compatible with 3D Slicer), NIfTI segmentation masks, and STL surface meshes.
+5. **Metric Extraction** — Computes ear canal centerlines (via vmtk) and anatomical measurements (lengths, diameters, cross-sections, angles) from the segmentation results.
 
 ### Input Requirements
 
@@ -25,12 +26,13 @@ For example: `Patient001__CT.nii.gz`, `S12345__CT.nii.gz`. The `PatientID` (ever
 
 ## Environment Setup
 
-Before running any part of the pipeline, you must create two Python virtual environments. The requirement files are located in the `env_req/` folder.
+Before running any part of the pipeline, you must create the required Python environments. The requirement files are located in the `env_req/` folder.
 
-| Environment | Used by | Key packages |
-|---|---|---|
-| `seg_env` | P1 | TotalSegmentator, SimpleITK |
-| `landmark_env` | P2, P3, P4, Inference, Postprocessing | PyTorch, MONAI, PyVista |
+| Environment | Type | Used by | Key packages |
+|---|---|---|---|
+| `seg_env` | venv | P1 | TotalSegmentator, SimpleITK |
+| `landmark_env` | venv | P2, P3, P4, Inference, Postprocessing | PyTorch, MONAI, PyVista |
+| `metric_env` | conda | Metric Extraction | vmtk, SimpleITK, pyvista |
 
 ### Automatic Setup (Recommended)
 
@@ -44,11 +46,13 @@ Before running any part of the pipeline, you must create two Python virtual envi
 python utils/setup_environments.py
 ```
 
-> **Important:** Run the setup script with your **system Python** (not from within a virtual environment). If you get "No such file or directory" errors, deactivate any active environment first with `deactivate`.
+> **Important:** Run the setup script with your **system Python** (not from within a virtual environment). If you get "No such file or directory" errors, deactivate any active environment first with `deactivate`. **conda** must be installed for the metric extraction environment (vmtk is only available via conda-forge).
 
 Both scripts will:
 - Create both virtual environments (`seg_env` and `landmark_env`) at the project root
-- Install all required packages from `env_req/seg_env_req.txt` and `env_req/landmark_env_req.txt`
+- Create the conda environment `metric_env` with vmtk and pip dependencies
+- Install all required packages from `env_req/seg_env_req.txt`, `env_req/landmark_env_req.txt`, and `env_req/metric_env_req.txt`
+- Fix ITK version symlinks for vmtk compatibility
 - Handle any existing environments (asks before overwriting)
 
 ### Manual Setup
@@ -65,6 +69,16 @@ python3 -m venv landmark_env
 source landmark_env/bin/activate
 pip install -r env_req/landmark_env_req.txt
 deactivate
+
+# Create metric_env for metric extraction (requires conda)
+conda create -n metric_env -c conda-forge --override-channels python=3.11 vmtk -y
+conda activate metric_env
+pip install -r env_req/metric_env_req.txt
+# Fix ITK symlinks (vmtk built against ITK 5.3, conda provides 5.4)
+cd "$CONDA_PREFIX/lib"
+for f in *-5.4.so.1; do link="${f/-5.4.so.1/-5.3.so.1}"; [ ! -e "$link" ] && ln -s "$f" "$link"; done
+for f in *-5.4.so; do link="${f/-5.4.so/-5.3.so}"; [ ! -e "$link" ] && ln -s "$f" "$link"; done
+conda deactivate
 ```
 
 ---
@@ -104,7 +118,7 @@ PRE_QUALITY_ASSESSED="False"
 EXCLUDED_SCANS_CSV="/path/to/excluded_scans.csv"
 ```
 
-The script runs all 7 steps automatically (**P1 → P2 → P3 → P4 → Tissue/Air Inference → Bone Inference → Postprocessing**), activates the correct environment for each step, and stops with a clear error if any step fails.
+The script runs all 8 steps automatically (**P1 → P2 → P3 → P4 → Tissue/Air Inference → Bone Inference → Postprocessing → Metric Extraction**), activates the correct environment for each step, and stops with a clear error if any step fails.
 
 ### Configuration Options
 
@@ -161,6 +175,31 @@ OUTPUT_DIR/
 │   │   └── {patient_id}_{ear_side}.nii.gz
 │   └── stl_bone/                              # Bone STL surface meshes
 │       └── {patient_id}_{ear_side}.stl
+│
+├── Metrics/                                   # Metric extraction outputs
+│   ├── processing_results.csv                 # All measurements aggregated
+│   ├── markups/                               # Updated landmark JSONs
+│   │   └── {patient_id}_{ear_side}.json
+│   ├── masks/                                 # Inverted masks used for processing
+│   │   └── {patient_id}_{ear_side}_inverted.nii.gz
+│   ├── stl/                                   # Derived surface meshes
+│   │   ├── {id}_clean_one_blob.stl            # Cleaned canal surface
+│   │   ├── {id}_eardrum.stl                   # Eardrum cap
+│   │   ├── {id}_isthmus.stl                   # Isthmus cross-section
+│   │   ├── {id}_isthmus_eardrum_segment.stl   # Canal segment: isthmus to eardrum
+│   │   ├── {id}_hard_tissue.stl               # Hard tissue portion
+│   │   ├── {id}_soft_tissue.stl               # Soft tissue portion
+│   │   ├── {id}_open_surface_cut_eardrum.stl  # Open surface at eardrum
+│   │   └── {id}_outside.stl                   # Outer canal surface
+│   └── vtk/                                   # Centerline & geodesic data
+│       ├── {id}_centerline.vtk                # Final centerline
+│       ├── {id}_centerline_features.vtk       # Centerline with cross-section features
+│       ├── {id}_centerline_landmarks.json     # Landmark positions on centerline
+│       ├── {id}_centerline_raw.vtk            # Raw vmtk centerline
+│       ├── {id}_centerline_refined.vtk        # Refined centerline
+│       ├── {id}_centerline_refined_raw.vtk    # Raw refined centerline
+│       ├── {id}_geodesic.vtk                  # Geodesic path
+│       └── {id}_geodesic_raw.vtk              # Raw geodesic path
 │
 └── Logs/                                      # Diagnostic & debug output
     ├── transform_logs/                        # JSON transformation history (P1, P2, P3)
@@ -472,6 +511,54 @@ python postprocessing/generate_results.py \
 - Tissue vs air STL meshes → `Results/stl/`
 - Bone NIfTI masks (skull + mandible) → `Results/masks_bone/`
 - Bone STL meshes → `Results/stl_bone/`
+
+---
+
+### Metric Extraction (`metric_extraction/pipeline.py`)
+
+**Environment:** `metric_env` (conda)
+
+Computes ear canal centerlines and anatomical measurements from the segmentation results using vmtk for centerline extraction.
+
+#### Running Metric Extraction Separately
+
+```bash
+conda activate metric_env
+python metric_extraction/run_pipeline.py \
+    --input "/path/to/Output/Results" \
+    --output "/path/to/Output/Metrics"
+```
+
+#### Processing Steps
+
+| Step | Description |
+|---|---|
+| 1. Mask inversion | Loads binary segmentation mask and inverts it for surface extraction |
+| 2. Mesh creation | Creates a 3D surface mesh from the inverted mask |
+| 3. Landmark loading | Reads landmarks from JSON markups (canal landmarks 1-7, FH landmarks 8-13, CBJ landmarks) |
+| 4. Geodesic path | Computes geodesic path between Top RS and Bottom RS landmarks |
+| 5. Centerline extraction | Extracts canal centerline using vmtk with plane-based trimming |
+| 6. Centerline validation | Validates and refines the centerline |
+| 7. Cross-section features | Extracts cross-section measurements along the centerline (area, perimeter, radii, aspect ratio) |
+| 8. Metric computation | Computes lengths, tortuosity indices, volumes, and landmark-specific measurements |
+| 9. CBJ analysis | Fits plane to CBJ landmarks, splits canal into soft/hard tissue portions |
+| 10. Output saving | Saves VTK centerlines, STL meshes, landmark JSONs, and aggregated CSV |
+
+#### Computed Metrics
+
+The `processing_results.csv` contains per-sample measurements including:
+
+| Category | Metrics |
+|---|---|
+| **Centerline** | length, tortuosity index |
+| **Geodesic path** | length, tortuosity index |
+| **Isthmus-to-eardrum segment** | length, tortuosity, volume |
+| **Cross-sections (mean ± std)** | min/max radius, area, perimeter, aspect ratio |
+| **Landmark cross-sections** | area, perimeter, radii, aspect ratio at 1st bend, 2nd bend, eardrum, isthmus |
+| **CBJ (cartilage-bone junction)** | length from start, length to end, proportion, plane distance |
+| **Tissue portions** | soft tissue volume, hard tissue volume |
+
+**Output:** `processing_results.csv`, per-sample VTK/STL/JSON files in `Metrics/` subdirectories
 
 ---
 

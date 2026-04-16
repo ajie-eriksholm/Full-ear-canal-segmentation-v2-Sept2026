@@ -16,6 +16,7 @@
 #   Inference Tissue   - 3D U-Net tissue vs air segmentation and landmark prediction
 #   Inference Bone     - nnU-Net bone segmentation
 #   Postprocessing     - Markup JSONs, NIfTI masks, and STL generation
+#   Metric Extraction  - Centerline extraction and metric computation (vmtk)
 # ==============================================================================
 
 # ==============================================================================
@@ -72,12 +73,14 @@ PREPROCESSING_DIR="$PROJECT_ROOT/preprocessing"
 INFERENCE_SCRIPT="$PROJECT_ROOT/model/test_tissue_air.py"
 BONE_INFERENCE_SCRIPT="$PROJECT_ROOT/model/test_bone.py"
 POSTPROCESSING_SCRIPT="$PROJECT_ROOT/postprocessing/generate_results.py"
+METRIC_EXTRACTION_SCRIPT="$PROJECT_ROOT/metric_extraction/run_pipeline.py"
 
 # Derived paths
 INFERENCE_SCANS_DIR="$OUTPUT_DIR/Preprocessing/P4_Normalized_Ears"
 BONE_INFERENCE_OUTPUT_DIR="$OUTPUT_DIR/Inference/nnUNet"
 FH_PLANE_LM="$OUTPUT_DIR/Preprocessing/P2_Landmarks/landmark_positions_after_cropping.csv"
 INFERENCE_OUTPUT_DIR="$OUTPUT_DIR/Inference"
+METRICS_OUTPUT_DIR="$OUTPUT_DIR/Metrics"
 PREDICTIONS_DIR="$INFERENCE_OUTPUT_DIR/$POSTPROCESSING_RUN/test_predictions"
 PREDICTED_LANDMARKS_CSV="$PREDICTIONS_DIR/predicted_landmark_coordinates.csv"
 RESULTS_OUTPUT_DIR="$OUTPUT_DIR/Results"
@@ -91,7 +94,7 @@ OUTPUT_PREDICTIONS_DIR_TEMPLATE="$INFERENCE_OUTPUT_DIR/{}/test_predictions"
 # P1: Initial Preprocessing (Clipping, Segmentation, Cropping, Resampling)
 # ==============================================================================
 echo "=================================================="
-echo "STEP 1/7: Running P1 - Initial Preprocessing"
+echo "STEP 1/8: Running P1 - Initial Preprocessing"
 echo "=================================================="
 echo "Activating seg_env for P1..."
 source "$SEG_ENV/bin/activate"
@@ -129,7 +132,7 @@ echo ""
 # P2: Landmark Detection and Alignment
 # ==============================================================================
 echo "=================================================="
-echo "STEP 2/7: Running P2 - Landmark Detection & Alignment"
+echo "STEP 2/8: Running P2 - Landmark Detection & Alignment"
 echo "=================================================="
 echo "Switching to landmark_env for P2-P4..."
 source "$LANDMARK_ENV/bin/activate"
@@ -168,7 +171,7 @@ echo ""
 # P3: ROI Cropping Around Ear Landmarks
 # ==============================================================================
 echo "=================================================="
-echo "STEP 3/7: Running P3 - ROI Cropping"
+echo "STEP 3/8: Running P3 - ROI Cropping"
 echo "=================================================="
 echo "Processed scans directory: $PROCESSED_SCANS_DIR"
 echo "Output directory: $OUTPUT_DIR"
@@ -197,7 +200,7 @@ echo ""
 # P4: Upsampling and Normalization for Inference
 # ==============================================================================
 echo "=================================================="
-echo "STEP 4/7: Running P4 - Upsampling & Normalization"
+echo "STEP 4/8: Running P4 - Upsampling & Normalization"
 echo "=================================================="
 echo "Processed scans directory: $PROCESSED_SCANS_DIR"
 echo "Output directory: $OUTPUT_DIR"
@@ -220,7 +223,7 @@ echo ""
 # STEP 5: Tissue vs Air Inference
 # ==============================================================================
 echo "=================================================="
-echo "STEP 5/7: Running Tissue vs Air Inference"
+echo "STEP 5/8: Running Tissue vs Air Inference"
 echo "=================================================="
 echo "Test scans directory: $INFERENCE_SCANS_DIR"
 echo "Model logs directory: $INFERENCE_LOGS_DIR"
@@ -247,7 +250,7 @@ echo ""
 # STEP 6: Bone Segmentation Inference (nnU-Net)
 # ==============================================================================
 echo "=================================================="
-echo "STEP 6/7: Running Bone Segmentation Inference (nnU-Net)"
+echo "STEP 6/8: Running Bone Segmentation Inference (nnU-Net)"
 echo "=================================================="
 echo "Input scans directory: $INFERENCE_SCANS_DIR"
 echo "Output directory: $BONE_INFERENCE_OUTPUT_DIR"
@@ -274,7 +277,7 @@ echo ""
 # STEP 7: Postprocessing
 # ==============================================================================
 echo "=================================================="
-echo "STEP 7/7: Running Postprocessing"
+echo "STEP 7/8: Running Postprocessing"
 echo "=================================================="
 echo "FH plane landmarks: $FH_PLANE_LM"
 echo "Predicted landmarks: $PREDICTED_LANDMARKS_CSV"
@@ -305,6 +308,43 @@ echo "[OK] Postprocessing completed successfully"
 echo ""
 
 # ==============================================================================
+# STEP 8: Metric Extraction (vmtk centerline + measurements)
+# ==============================================================================
+echo "=================================================="
+echo "STEP 8/8: Running Metric Extraction"
+echo "=================================================="
+echo "Switching to metric_env (conda) for metric extraction..."
+eval "$(conda shell.bash hook)"
+conda activate metric_env
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: Failed to activate conda environment 'metric_env'"
+    echo "Make sure it exists. You can create it with: sh_files/setup_metric_env.sh"
+    exit 1
+fi
+
+echo "Python environment: $(which python)"
+python --version
+echo "Input directory: $RESULTS_OUTPUT_DIR"
+echo "Output directory: $METRICS_OUTPUT_DIR"
+echo "=================================================="
+
+python "$METRIC_EXTRACTION_SCRIPT" \
+    --input "$RESULTS_OUTPUT_DIR" \
+    --output "$METRICS_OUTPUT_DIR"
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: Metric extraction failed!"
+    exit 1
+fi
+
+conda deactivate
+
+echo ""
+echo "[OK] Metric extraction completed successfully"
+echo ""
+
+# ==============================================================================
 # COMPLETION
 # ==============================================================================
 echo "=================================================="
@@ -329,4 +369,5 @@ echo "  NIfTI masks:             $RESULTS_OUTPUT_DIR/masks"
 echo "  STL meshes:              $RESULTS_OUTPUT_DIR/stl"
 echo "  Bone NIfTI masks:        $RESULTS_OUTPUT_DIR/masks_bone"
 echo "  Bone STL meshes:         $RESULTS_OUTPUT_DIR/stl_bone"
+echo "  Metrics:                 $METRICS_OUTPUT_DIR"
 echo "=================================================="

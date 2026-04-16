@@ -2,9 +2,10 @@
 """
 Environment Setup Script (Python version)
 ==========================================
-This script automatically creates both required virtual environments:
-- seg_env (for P1 preprocessing)
-- landmark_env (for P2, P3, P4 preprocessing)
+This script automatically creates all required environments:
+- seg_env      (venv)  - for P1 preprocessing
+- landmark_env (venv)  - for P2-P4 preprocessing, inference, postprocessing
+- metric_env   (conda) - for metric extraction (vmtk centerline analysis)
 
 Usage:
     python setup_environments.py
@@ -12,6 +13,7 @@ Usage:
 Requirements:
     - Python 3.x installed
     - pip installed
+    - conda installed (for metric_env / vmtk)
 """
 
 import os
@@ -125,17 +127,21 @@ def main():
     # Environment paths (at project root)
     seg_env = project_root / "seg_env"
     landmark_env = project_root / "landmark_env"
+    metric_env_name = "metric_env"
+    metric_python_version = "3.11"
     
     # Requirement files (in env_req/ folder)
     seg_req = project_root / "env_req" / "seg_env_req.txt"
     landmark_req = project_root / "env_req" / "landmark_env_req.txt"
+    metric_req = project_root / "env_req" / "metric_env_req.txt"
     
     # Print header
-    print_header("PREPROCESSING ENVIRONMENT SETUP")
+    print_header("ENVIRONMENT SETUP")
     
-    print("This script will create two virtual environments:")
-    print("  1. seg_env      - for P1 preprocessing (TotalSegmentator, SimpleITK)")
-    print("  2. landmark_env - for P2-P4 preprocessing (PyTorch, MONAI, PyVista)")
+    print("This script will create the following environments:")
+    print("  1. seg_env      (venv)  - for P1 preprocessing (TotalSegmentator, SimpleITK)")
+    print("  2. landmark_env (venv)  - for P2-P4, inference, postprocessing (PyTorch, MONAI, PyVista)")
+    print("  3. metric_env   (conda) - for metric extraction (vmtk, centerline analysis)")
     print()
     
     # Check Python version
@@ -152,7 +158,11 @@ def main():
         print_error(f"Requirement file not found: {landmark_req}")
         sys.exit(1)
     
-    print_success("Found both requirement files")
+    if not metric_req.exists():
+        print_error(f"Requirement file not found: {metric_req}")
+        sys.exit(1)
+    
+    print_success("Found all requirement files")
     print()
     
     # Ask for confirmation
@@ -162,10 +172,10 @@ def main():
         sys.exit(0)
     
     # Create and setup seg_env
-    print_header("STEP 1/4: Creating seg_env")
+    print_header("STEP 1/6: Creating seg_env")
     skip_seg_env = not create_venv(seg_env, "seg_env")
     
-    print_header("STEP 2/4: Installing seg_env requirements")
+    print_header("STEP 2/6: Installing seg_env requirements")
     if not skip_seg_env:
         if not install_requirements(seg_env, seg_req, "seg_env"):
             sys.exit(1)
@@ -173,15 +183,71 @@ def main():
         print_warning("Skipped seg_env installation")
     
     # Create and setup landmark_env
-    print_header("STEP 3/4: Creating landmark_env")
+    print_header("STEP 3/6: Creating landmark_env")
     skip_landmark_env = not create_venv(landmark_env, "landmark_env")
     
-    print_header("STEP 4/4: Installing landmark_env requirements")
+    print_header("STEP 4/6: Installing landmark_env requirements")
     if not skip_landmark_env:
         if not install_requirements(landmark_env, landmark_req, "landmark_env"):
             sys.exit(1)
     else:
         print_warning("Skipped landmark_env installation")
+    
+    # Create and setup metric_env (conda)
+    print_header("STEP 5/6: Creating metric_env (conda)")
+    
+    # Check conda is available
+    if not shutil.which("conda"):
+        print_error("conda not found. Please install Anaconda or Miniconda first.")
+        print_info("https://docs.conda.io/en/latest/miniconda.html")
+        sys.exit(1)
+    
+    # Check if metric_env already exists
+    skip_metric_env = False
+    result = subprocess.run("conda env list", shell=True, capture_output=True, text=True)
+    if metric_env_name in result.stdout:
+        print_warning(f"{metric_env_name} already exists")
+        response = input("Do you want to remove and recreate it? (y/n): ").strip().lower()
+        if response == 'y':
+            print_info(f"Removing existing {metric_env_name}...")
+            run_command(f"conda env remove -n {metric_env_name} -y")
+        else:
+            print_warning(f"Skipping {metric_env_name} creation")
+            skip_metric_env = True
+    
+    if not skip_metric_env:
+        print_info(f"Creating conda environment with Python {metric_python_version} and vmtk...")
+        print("This may take several minutes as conda resolves dependencies...")
+        if not run_command(
+            f"conda create -n {metric_env_name} -c conda-forge --override-channels "
+            f"python={metric_python_version} vmtk -y"
+        ):
+            print_error("Failed to create metric_env")
+            sys.exit(1)
+        print_success("metric_env created successfully")
+    
+    print_header("STEP 6/6: Installing metric_env pip requirements")
+    
+    if not skip_metric_env:
+        # Install pip requirements and fix ITK symlinks via shell
+        conda_hook = 'eval "$(conda shell.bash hook)"'
+        install_cmd = (
+            f'{conda_hook} && conda activate {metric_env_name} && '
+            f'pip install -r {metric_req} && '
+            f'cd "$CONDA_PREFIX/lib" && '
+            f'for f in *-5.4.so.1; do link="${{f/-5.4.so.1/-5.3.so.1}}"; '
+            f'[ ! -e "$link" ] && ln -s "$f" "$link"; done; '
+            f'for f in *-5.4.so; do link="${{f/-5.4.so/-5.3.so}}"; '
+            f'[ ! -e "$link" ] && ln -s "$f" "$link"; done; '
+            f'cd "{project_root}"'
+        )
+        if run_command(install_cmd, "Installing pip packages and fixing ITK symlinks..."):
+            print_success("metric_env requirements installed and ITK symlinks created")
+        else:
+            print_error("Failed to install metric_env requirements")
+            sys.exit(1)
+    else:
+        print_warning("Skipped metric_env installation")
     
     # Print summary
     print_header("SETUP COMPLETE!")
@@ -206,19 +272,27 @@ def main():
             print("  → Activate with: landmark_env\\Scripts\\activate")
         else:
             print("  → Activate with: source landmark_env/bin/activate")
-        print("  → Used for: P2, P3, P4 preprocessing")
+        print("  → Used for: P2-P4, inference, postprocessing")
     else:
         print_warning("landmark_env: Skipped (already exists)")
     print()
     
-    print_info("You can now run the preprocessing pipeline using:")
-    if sys.platform == "win32":
-        print("  sh sh_files/run_full_preprocessing.sh")
+    if not skip_metric_env:
+        print_success(f"metric_env:   (conda environment)")
+        print("  → Activate with: conda activate metric_env")
+        print("  → Used for: metric extraction (vmtk centerline analysis)")
     else:
-        print("  ./sh_files/run_full_preprocessing.sh")
+        print_warning("metric_env:   Skipped (already exists)")
     print()
     
-    print_header("READY TO PREPROCESS!")
+    print_info("You can now run the full pipeline using:")
+    if sys.platform == "win32":
+        print("  sh sh_files/run_full_pipeline.sh")
+    else:
+        print("  ./sh_files/run_full_pipeline.sh")
+    print()
+    
+    print_header("READY TO GO!")
 
 if __name__ == "__main__":
     main()

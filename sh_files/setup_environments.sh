@@ -2,9 +2,10 @@
 # ==============================================================================
 # Environment Setup Script
 # ==============================================================================
-# This script automatically creates both required virtual environments:
-# - seg_env (for P1 preprocessing)
-# - landmark_env (for P2, P3, P4 preprocessing)
+# This script automatically creates all required environments:
+# - seg_env      (venv)  - for P1 preprocessing
+# - landmark_env (venv)  - for P2-P4 preprocessing, inference, postprocessing
+# - metric_env   (conda) - for metric extraction (vmtk centerline analysis)
 #
 # Usage:
 #   ./setup_environments.sh
@@ -12,6 +13,7 @@
 # Requirements:
 #   - Python 3.x installed
 #   - pip installed
+#   - conda installed (for metric_env / vmtk)
 # ==============================================================================
 
 set -e  # Exit on error
@@ -31,9 +33,14 @@ PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 SEG_ENV="$PROJECT_ROOT/seg_env"
 LANDMARK_ENV="$PROJECT_ROOT/landmark_env"
 
+# Metric environment (conda)
+METRIC_ENV_NAME="metric_env"
+METRIC_PYTHON_VERSION="3.11"
+
 # Requirement files (in env_req/ folder)
 SEG_REQ="$PROJECT_ROOT/env_req/seg_env_req.txt"
 LANDMARK_REQ="$PROJECT_ROOT/env_req/landmark_env_req.txt"
+METRIC_REQ="$PROJECT_ROOT/env_req/metric_env_req.txt"
 
 # ==============================================================================
 # Helper Functions
@@ -67,11 +74,12 @@ print_info() {
 # Main Setup
 # ==============================================================================
 
-print_header "PREPROCESSING ENVIRONMENT SETUP"
+print_header "ENVIRONMENT SETUP"
 
-echo "This script will create two virtual environments:"
-echo "  1. seg_env      - for P1 preprocessing (TotalSegmentator, SimpleITK)"
-echo "  2. landmark_env - for P2-P4 preprocessing (PyTorch, MONAI, PyVista)"
+echo "This script will create the following environments:"
+echo "  1. seg_env      (venv)  - for P1 preprocessing (TotalSegmentator, SimpleITK)"
+echo "  2. landmark_env (venv)  - for P2-P4, inference, postprocessing (PyTorch, MONAI, PyVista)"
+echo "  3. metric_env   (conda) - for metric extraction (vmtk, centerline analysis)"
 echo ""
 
 # Check if Python is available
@@ -95,7 +103,12 @@ if [ ! -f "$LANDMARK_REQ" ]; then
     exit 1
 fi
 
-print_success "Found both requirement files"
+if [ ! -f "$METRIC_REQ" ]; then
+    print_error "Requirement file not found: $METRIC_REQ"
+    exit 1
+fi
+
+print_success "Found all requirement files"
 echo ""
 
 # Ask for confirmation
@@ -110,7 +123,7 @@ fi
 # Create seg_env
 # ==============================================================================
 
-print_header "STEP 1/4: Creating seg_env"
+print_header "STEP 1/6: Creating seg_env"
 
 if [ -d "$SEG_ENV" ]; then
     print_warning "seg_env already exists at: $SEG_ENV"
@@ -141,7 +154,7 @@ fi
 # Install seg_env requirements
 # ==============================================================================
 
-print_header "STEP 2/4: Installing seg_env requirements"
+print_header "STEP 2/6: Installing seg_env requirements"
 
 if [ "$SKIP_SEG_ENV" != true ]; then
     print_info "Activating seg_env..."
@@ -170,7 +183,7 @@ fi
 # Create landmark_env
 # ==============================================================================
 
-print_header "STEP 3/4: Creating landmark_env"
+print_header "STEP 3/6: Creating landmark_env"
 
 if [ -d "$LANDMARK_ENV" ]; then
     print_warning "landmark_env already exists at: $LANDMARK_ENV"
@@ -201,7 +214,7 @@ fi
 # Install landmark_env requirements
 # ==============================================================================
 
-print_header "STEP 4/4: Installing landmark_env requirements"
+print_header "STEP 4/6: Installing landmark_env requirements"
 
 if [ "$SKIP_LANDMARK_ENV" != true ]; then
     print_info "Activating landmark_env..."
@@ -227,12 +240,103 @@ else
 fi
 
 # ==============================================================================
+# Create metric_env (conda)
+# ==============================================================================
+
+print_header "STEP 5/6: Creating metric_env (conda)"
+
+# Check conda is available
+if ! command -v conda &> /dev/null; then
+    print_error "conda not found. Please install Anaconda or Miniconda first."
+    print_info "https://docs.conda.io/en/latest/miniconda.html"
+    exit 1
+fi
+
+print_info "Found: $(conda --version)"
+
+if conda env list | grep -qw "$METRIC_ENV_NAME"; then
+    print_warning "metric_env already exists"
+    read -p "Do you want to remove and recreate it? (y/n) " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        print_info "Removing existing metric_env..."
+        conda env remove -n "$METRIC_ENV_NAME" -y
+    else
+        print_warning "Skipping metric_env creation"
+        SKIP_METRIC_ENV=true
+    fi
+fi
+
+if [ "$SKIP_METRIC_ENV" != true ]; then
+    print_info "Creating conda environment with Python $METRIC_PYTHON_VERSION and vmtk..."
+    echo "This may take several minutes as conda resolves dependencies..."
+    conda create -n "$METRIC_ENV_NAME" -c conda-forge --override-channels \
+        python="$METRIC_PYTHON_VERSION" vmtk -y
+
+    if [ $? -eq 0 ]; then
+        print_success "metric_env created successfully"
+    else
+        print_error "Failed to create metric_env"
+        exit 1
+    fi
+fi
+
+# ==============================================================================
+# Install metric_env pip requirements + ITK symlink fix
+# ==============================================================================
+
+print_header "STEP 6/6: Installing metric_env pip requirements"
+
+if [ "$SKIP_METRIC_ENV" != true ]; then
+    print_info "Activating metric_env..."
+    eval "$(conda shell.bash hook)"
+    conda activate "$METRIC_ENV_NAME"
+
+    print_info "Installing pip requirements from: $METRIC_REQ"
+    pip install -r "$METRIC_REQ"
+
+    if [ $? -eq 0 ]; then
+        print_success "metric_env pip requirements installed successfully"
+    else
+        print_error "Failed to install metric_env pip requirements"
+        exit 1
+    fi
+
+    # Fix ITK version symlinks for vmtk compatibility
+    # vmtk was built against ITK 5.3 but conda-forge provides ITK 5.4
+    print_info "Fixing ITK version symlinks for vmtk compatibility..."
+    cd "$CONDA_PREFIX/lib"
+    for f in *-5.4.so.1; do
+        link="${f/-5.4.so.1/-5.3.so.1}"
+        [ ! -e "$link" ] && ln -s "$f" "$link"
+    done
+    for f in *-5.4.so; do
+        link="${f/-5.4.so/-5.3.so}"
+        [ ! -e "$link" ] && ln -s "$f" "$link"
+    done
+    cd "$PROJECT_ROOT"
+    print_success "ITK symlinks created"
+
+    # Verify imports
+    print_info "Verifying metric_env imports..."
+    python -c "from vmtk import vmtkscripts; print('  vmtk OK')" && \
+    python -c "import SimpleITK; print('  SimpleITK OK')" && \
+    python -c "import pyvista; print('  pyvista OK')" && \
+    print_success "metric_env verification passed" || \
+    print_warning "Some metric_env imports failed - check the environment"
+
+    conda deactivate
+else
+    print_warning "Skipped metric_env installation"
+fi
+
+# ==============================================================================
 # Summary
 # ==============================================================================
 
 print_header "SETUP COMPLETE!"
 
-echo "Virtual environments created:"
+echo "Environments created:"
 echo ""
 if [ "$SKIP_SEG_ENV" != true ]; then
     print_success "seg_env:      $SEG_ENV"
@@ -245,12 +349,20 @@ echo ""
 if [ "$SKIP_LANDMARK_ENV" != true ]; then
     print_success "landmark_env: $LANDMARK_ENV"
     echo "  → Activate with: source landmark_env/bin/activate"
-    echo "  → Used for: P2, P3, P4 preprocessing"
+    echo "  → Used for: P2-P4, inference, postprocessing"
 else
     print_warning "landmark_env: Skipped (already exists)"
 fi
 echo ""
-print_info "You can now run the preprocessing pipeline using:"
-echo "  ./sh_files/run_full_preprocessing.sh"
+if [ "$SKIP_METRIC_ENV" != true ]; then
+    print_success "metric_env:   (conda environment)"
+    echo "  → Activate with: conda activate metric_env"
+    echo "  → Used for: metric extraction (vmtk centerline analysis)"
+else
+    print_warning "metric_env:   Skipped (already exists)"
+fi
 echo ""
-print_header "READY TO PREPROCESS!"
+print_info "You can now run the full pipeline using:"
+echo "  ./sh_files/run_full_pipeline.sh"
+echo ""
+print_header "READY TO GO!"
