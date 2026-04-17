@@ -55,6 +55,22 @@ Both scripts will:
 - Fix ITK version symlinks for vmtk compatibility
 - Handle any existing environments (asks before overwriting)
 
+#### Troubleshooting: Permission Denied
+
+If you get `Permission denied` when running the setup script:
+
+```bash
+chmod +x sh_files/setup_environments.sh
+./sh_files/setup_environments.sh
+```
+
+Or run it directly with bash:
+```bash
+bash sh_files/setup_environments.sh
+```
+
+> **Note:** If you downloaded the repository as a ZIP file instead of cloning it with git, executable permissions are not preserved. Always use `git clone` to get the repository.
+
 ### Manual Setup
 
 ```bash
@@ -90,6 +106,8 @@ The simplest way to run everything (preprocessing + inference + postprocessing) 
 ```bash
 ./sh_files/run_full_pipeline.sh
 ```
+
+> **Note:** If you get `Permission denied`, run `chmod +x sh_files/run_full_pipeline.sh` first, or use `bash sh_files/run_full_pipeline.sh`.
 
 **Before running**, edit the configuration section at the top of `sh_files/run_full_pipeline.sh`:
 
