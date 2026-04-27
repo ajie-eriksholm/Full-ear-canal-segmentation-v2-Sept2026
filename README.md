@@ -1,3 +1,4 @@
+
 # Full Ear Canal Segmentation
 
 ## Introduction
@@ -577,6 +578,52 @@ The `processing_results.csv` contains per-sample measurements including:
 | **Tissue portions** | soft tissue volume, hard tissue volume |
 
 **Output:** `processing_results.csv`, per-sample VTK/STL/JSON files in `Metrics/` subdirectories
+
+---
+
+
+## Retraining Tissue/Air Segmentation and Landmark Placement
+
+
+If you want to retrain the model (for example, to add more data or improve performance), follow these steps:
+
+### 1. Prepare Your Data
+
+- **CT Scans:** Place your raw NIfTI CT volumes in a directory (default: `/kbnnfsserver/erhdata/Processed-Data/SBEO/Retrain/CTs`).
+- **Segmentation Masks:** Place your ear mask segmentations (NRRD format) in `/kbnnfsserver/erhdata/Raw/EarScans/Images/HECKTOR 2025 Training Data/Annotations/segmentations/ear_masks_train` (or specify a different directory).
+- **Landmark JSONs:** Place your anatomical landmark JSON files in `/kbnnfsserver/erhdata/Raw/EarScans/Images/HECKTOR 2025 Training Data/Annotations/landmarks/ear_anatomical_landmarks_train` (or specify a different directory).
+
+### 2. Run the Retraining Script
+
+Use the provided shell script to run the **full preprocessing pipeline (P1–P4)**, generate heatmaps, and start training:
+
+```bash
+cd sh_files
+bash run_retrain_tissue_air.sh
+```
+
+This will:
+- Run P1–P4 preprocessing on your CTs (outputting to `/kbnnfsserver/erhdata/Processed-Data/SBEO/Retrain/CTs_P4` by default)
+- Generate heatmaps from the P4-processed CTs and your landmark JSONs
+- Train the tissue/air segmentation and landmark placement model using the P4-processed CTs, segmentation masks, and heatmaps
+- Save all outputs (processed CTs, heatmaps, logs, models) under `/kbnnfsserver/erhdata/Processed-Data/SBEO/Retrain` by default
+
+#### Customizing Input/Output Directories
+You can override the default directories by passing arguments to the script:
+
+```bash
+bash run_retrain_tissue_air.sh <CT_DIR> <JSON_DIR> <SEG_DIR> <HEATMAP_DIR> <LOG_DIR> <MODEL_DIR>
+```
+For example:
+```bash
+bash run_retrain_tissue_air.sh /path/to/CTs /path/to/landmarks /path/to/masks /path/to/heatmaps /path/to/logs /path/to/models
+```
+
+**Note:** The CT directory you provide (`<CT_DIR>`) should contain your raw CTs. The script will automatically create intermediate directories for each preprocessing stage (P1–P4) under the retraining folder.
+
+### 3. Adding More Data
+
+To improve training, simply add more CTs, segmentation masks, and landmark JSONs to the respective directories before running the script. The pipeline will automatically use all available data in the specified folders.
 
 ---
 
