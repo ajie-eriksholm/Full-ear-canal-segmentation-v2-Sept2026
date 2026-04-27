@@ -71,17 +71,27 @@ def get_device():
 
 DEVICE = get_device()
 
+
 # ============================================================
 # PATHS (YOUR DIRECTORIES)
 # ============================================================
-CT_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_CTs_resampled_128" # CTs already normalized between 0 and 1
-SEG_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Masks_resampled_128"
-HEATMAPS_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Precomputed_Heatmaps_resampled_128_Corrected"
+import argparse
+parser = argparse.ArgumentParser(description="Train dual-task model for segmentation and landmark heatmaps.")
+parser.add_argument('--ct_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_CTs_resampled_128", help='Directory with CT NIfTI files')
+parser.add_argument('--seg_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Masks_resampled_128", help='Directory with segmentation masks')
+parser.add_argument('--heatmap_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Precomputed_Heatmaps_resampled_128_Corrected", help='Directory with precomputed heatmaps')
+parser.add_argument('--log_dir', type=str, default=None, help='Directory for logs (default: BASE_DIR/Logs)')
+parser.add_argument('--model_dir', type=str, default=None, help='Directory for models (default: BASE_DIR/Models)')
+args = parser.parse_args()
 
-BASE_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline"
-SPLIT_CSV = os.path.join(BASE_DIR, "train_val_split.csv")
-LOG_DIR = os.path.join(BASE_DIR, "Logs")
-MODEL_DIR = os.path.join(BASE_DIR, "Models")
+CT_DIR = args.ct_dir
+SEG_DIR = args.seg_dir
+HEATMAPS_DIR = args.heatmap_dir
+
+BASE_DIR = os.path.dirname(os.path.dirname(CT_DIR)) if args.log_dir is None or args.model_dir is None else None
+SPLIT_CSV = os.path.join(BASE_DIR if BASE_DIR else os.path.dirname(args.log_dir), "train_val_split.csv")
+LOG_DIR = args.log_dir if args.log_dir else os.path.join(BASE_DIR, "Logs")
+MODEL_DIR = args.model_dir if args.model_dir else os.path.join(BASE_DIR, "Models")
 
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)

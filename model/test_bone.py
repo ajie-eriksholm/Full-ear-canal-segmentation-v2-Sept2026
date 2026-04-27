@@ -40,7 +40,7 @@ def run_nnunet_predict(input_dir, output_dir, dataset_id=1, configuration="3d_fu
     Run nnU-Net prediction.
 
     Args:
-        input_dir: Directory with input images (*_0000.nii.gz)
+        input_dir: Directory with input images (*_0000.nii or *_0000.nii.gz)
         output_dir: Directory to save predictions
         dataset_id: nnU-Net dataset ID
         configuration: nnU-Net configuration (e.g., '3d_fullres')
@@ -102,12 +102,15 @@ def run_nnunet_predict(input_dir, output_dir, dataset_id=1, configuration="3d_fu
         print(f"  Plans:         {plans}")
     print("=" * 80 + "\n")
 
-    # Count input files
-    input_files = [f for f in os.listdir(input_dir) if f.endswith("_0000.nii.gz")]
+    # Count input files (.nii and .nii.gz)
+    input_files = [
+        f for f in os.listdir(input_dir)
+        if f.endswith("_0000.nii.gz") or f.endswith("_0000.nii")
+    ]
     print(f"Found {len(input_files)} input cases\n")
 
     if len(input_files) == 0:
-        print(f"ERROR: No *_0000.nii.gz files found in {input_dir}")
+        print(f"ERROR: No *_0000.nii or *_0000.nii.gz files found in {input_dir}")
         sys.exit(1)
 
     # Run prediction
@@ -130,7 +133,7 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--input_dir", required=True,
-                        help="Directory with input images (*_0000.nii.gz)")
+                        help="Directory with input images (*_0000.nii or *_0000.nii.gz)")
     parser.add_argument("--output_dir", required=True,
                         help="Directory to save predictions")
     parser.add_argument("--dataset_id", type=int, default=1,

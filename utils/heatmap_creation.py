@@ -1,4 +1,5 @@
 
+
 # Precompute heatmaps
 import os
 import json
@@ -6,13 +7,20 @@ import torch
 import numpy as np
 from scipy.ndimage import gaussian_filter
 import nibabel as nib
+import argparse
 
 SIGMA = 3
 landmark_ids = [1, 2, 3, 4, 5, 6, 7]  # your landmark IDs
 
-nii_dir =  "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_CTs_resampled_128"
-json_dir ="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_Markups_Corrected"
-heatmap_dir = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Precomputed_Heatmaps_resampled_128_Corrected"
+parser = argparse.ArgumentParser(description="Precompute landmark heatmaps from CT and JSON markups.")
+parser.add_argument('--nii_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_CTs_resampled_128", help='Directory with input NIfTI files')
+parser.add_argument('--json_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_Markups_Corrected", help='Directory with input JSON markup files')
+parser.add_argument('--heatmap_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Precomputed_Heatmaps_resampled_128_Corrected", help='Output directory for heatmaps')
+args = parser.parse_args()
+
+nii_dir = args.nii_dir
+json_dir = args.json_dir
+heatmap_dir = args.heatmap_dir
 os.makedirs(heatmap_dir, exist_ok=True)
 
 for nii_file in sorted(os.listdir(nii_dir)):
