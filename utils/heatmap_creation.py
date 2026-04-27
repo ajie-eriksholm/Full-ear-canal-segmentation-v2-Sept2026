@@ -32,8 +32,15 @@ for nii_file in sorted(os.listdir(nii_dir)):
         print(f"Skipping {nii_file} - heatmap already exists")
         continue
 
-    json_path = os.path.join(json_dir, nii_file.replace('.nii.gz', '.mrk.json'))
+    # Fix: look for _ear in the JSON filename for left/right ears
+    json_base = nii_file.replace('.nii.gz', '')
+    if json_base.endswith('_left_0000'):
+        json_base = json_base.replace('_left_0000', '_left_ear')
+    elif json_base.endswith('_right_0000'):
+        json_base = json_base.replace('_right_0000', '_right_ear')
+    json_path = os.path.join(json_dir, json_base + '.mrk.json')
     if not os.path.exists(json_path):
+        print(f"[WARN] JSON markup not found for {nii_file}: {json_path}")
         continue
     
 

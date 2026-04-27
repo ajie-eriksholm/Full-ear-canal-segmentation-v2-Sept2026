@@ -81,20 +81,20 @@ parser.add_argument('--ct_dir', type=str, default="/projects/oticon/erhdata/Proc
 parser.add_argument('--seg_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Masks_resampled_128", help='Directory with segmentation masks')
 parser.add_argument('--heatmap_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Precomputed_Heatmaps_resampled_128_Corrected", help='Directory with precomputed heatmaps')
 parser.add_argument('--log_dir', type=str, default=None, help='Directory for logs (default: BASE_DIR/Logs)')
-parser.add_argument('--model_dir', type=str, default=None, help='Directory for models (default: BASE_DIR/Models)')
+parser.add_argument('--epochs', type=int, default=500, help='Number of training epochs')
 args = parser.parse_args()
 
 CT_DIR = args.ct_dir
 SEG_DIR = args.seg_dir
 HEATMAPS_DIR = args.heatmap_dir
 
-BASE_DIR = os.path.dirname(os.path.dirname(CT_DIR)) if args.log_dir is None or args.model_dir is None else None
+MAX_EPOCHS = args.epochs
+
+BASE_DIR = os.path.dirname(os.path.dirname(CT_DIR)) if args.log_dir is None else None
 SPLIT_CSV = os.path.join(BASE_DIR if BASE_DIR else os.path.dirname(args.log_dir), "train_val_split.csv")
 LOG_DIR = args.log_dir if args.log_dir else os.path.join(BASE_DIR, "Logs")
-MODEL_DIR = args.model_dir if args.model_dir else os.path.join(BASE_DIR, "Models")
 
 os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(MODEL_DIR, exist_ok=True)
 
 # ============================================================
 # REPRODUCIBILITY
@@ -177,35 +177,37 @@ class SegmentationDataset(Dataset):
         image = torch.from_numpy(image).unsqueeze(0)
 
         # ---------- Load Mask ----------
+
+        # --- Mask naming logic ---
         seg_name = fname.replace(".nii.gz", ".nrrd")
+        if seg_name.endswith('_0000.nrrd'):
+            seg_name = seg_name.replace('_0000.nrrd', '.nrrd')
+        if seg_name.endswith('right.nrrd'):
+            seg_name = seg_name.replace('right.nrrd', 'right_ear.nrrd')
+        elif seg_name.endswith('left.nrrd'):
+            seg_name = seg_name.replace('left.nrrd', 'left_ear.nrrd')
         seg_path = os.path.join(self.seg_dir, seg_name)
 
         mask, header = nrrd.read(seg_path)
-        
-        # Store original header for later use when saving predictions
-        # This preserves space directions, space origin, and other spatial metadata
         self.nrrd_headers[fname] = header
-        
-        # NRRD and NIfTI may have different axis ordering
-        # NRRD is typically (x,y,z) while our CT from NIfTI might be (x,y,z) or different
-        # Check if transpose is needed to match CT dimensions
-        if mask.shape != image.shape[1:]:  # Compare with image shape (without channel dim)
-            print(f"[WARNING] Mask shape {mask.shape} doesn't match CT shape {image.shape[1:]}")
-            # Try transposing to match
-            if mask.T.shape == image.shape[1:]:
-                mask = mask.T
-                print(f"[INFO] Transposed mask to {mask.shape}")
-        
-        # Convert binary mask to 2-channel one-hot encoding
-        # Channel 0: cavities (background), Channel 1: tissue (foreground)
+
+        # --- Upsample mask to 128x128x128 if needed ---
+        import torch.nn.functional as F
         mask_tensor = torch.from_numpy(mask).float()
+        if mask_tensor.shape != torch.Size([128, 128, 128]):
+            print(f"[INFO] Upsampling mask from {mask_tensor.shape} to (128, 128, 128)")
+            mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)  # (1,1,D,H,W)
+            mask_tensor = F.interpolate(mask_tensor, size=(128,128,128), mode='nearest')
+            mask_tensor = mask_tensor.squeeze(0).squeeze(0)
+
+        # Convert binary mask to 2-channel one-hot encoding
         mask_one_hot = torch.zeros((2,) + mask_tensor.shape, dtype=torch.float32)
         mask_one_hot[0] = (mask_tensor == 0).float()  # Cavities
         mask_one_hot[1] = (mask_tensor == 1).float()  # Tissue
         mask = mask_one_hot
 
-        # ---------- Load Heatmaps ----------
-        heatmap_name = fname.replace(".nii.gz", "_heatmaps.pt")
+        # --- Heatmap naming logic: match exactly what is produced by heatmap_creation.py ---
+        heatmap_name = fname.replace('.nii.gz', '_heatmaps.pt')
         heatmap_path = os.path.join(self.heatmap_dir, heatmap_name)
         heatmaps = torch.load(heatmap_path, map_location='cpu').float()
 
