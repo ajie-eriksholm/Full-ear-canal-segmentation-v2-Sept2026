@@ -24,12 +24,12 @@
 # ==============================================================================
 
 # --- Directory paths ---
-RAW_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/test_scan/Raw"
-PROCESSED_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/test_scan/Processed-Data"
-OUTPUT_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/test_scan/Output"
+RAW_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/ctich_noeyes/Raw"
+PROCESSED_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/ctich_noeyes/Processed-Data"
+OUTPUT_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/ctich_noeyes/Output"
 
 # --- Processing options ---
-NO_EYES="False"              # Set to "True" if scans don't include eyes
+NO_EYES="True"              # Set to "True" if scans don't include eyes
 SKIP_ALIGNMENT="False"       # Set to "True" to skip alignment step
 
 # --- Python environments ---
@@ -90,6 +90,46 @@ RESULTS_OUTPUT_DIR="$OUTPUT_DIR/Results"
 MODEL_PATH_TEMPLATE="$INFERENCE_LOGS_DIR/{}/best_model.pth"
 OUTPUT_PREDICTIONS_DIR_TEMPLATE="$INFERENCE_OUTPUT_DIR/{}/test_predictions"
 
+# Count files matching a regex under a directory (returns 0 if dir is missing)
+count_matching_files() {
+    local search_dir="$1"
+    local regex="$2"
+    if [ ! -d "$search_dir" ]; then
+        echo 0
+        return
+    fi
+    find "$search_dir" -type f -regextype posix-extended -regex "$regex" 2>/dev/null | wc -l | tr -d ' '
+}
+
+# ==============================================================================
+# Directory preparation
+# ==============================================================================
+echo "=================================================="
+echo "Preparing required directories"
+echo "=================================================="
+
+# RAW_SCANS_DIR is expected to contain existing input scans.
+if [ ! -d "$RAW_SCANS_DIR" ]; then
+    echo "ERROR: RAW_SCANS_DIR does not exist: $RAW_SCANS_DIR"
+    exit 1
+fi
+
+# Create directories that should exist as pipeline inputs/outputs.
+mkdir -p "$PROCESSED_SCANS_DIR" "$OUTPUT_DIR" "$INFERENCE_OUTPUT_DIR" "$METRICS_OUTPUT_DIR" "$RESULTS_OUTPUT_DIR"
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: Failed to create one or more required directories"
+    exit 1
+fi
+
+echo "Processed scans directory: $PROCESSED_SCANS_DIR"
+echo "Output directory: $OUTPUT_DIR"
+echo "Inference output directory: $INFERENCE_OUTPUT_DIR"
+echo "Metrics output directory: $METRICS_OUTPUT_DIR"
+echo "Results output directory: $RESULTS_OUTPUT_DIR"
+echo "=================================================="
+echo ""
+
 # ==============================================================================
 # P1: Initial Preprocessing (Clipping, Segmentation, Cropping, Resampling)
 # ==============================================================================
@@ -123,6 +163,15 @@ if [ $? -ne 0 ]; then
     echo "ERROR: P1 preprocessing failed!"
     exit 1
 fi
+
+P1_OUTPUT_COUNT=$(count_matching_files "$PROCESSED_SCANS_DIR" ".*/[^/]+_CT_resampled_256\\.nii(\\.gz)?$")
+if [ "$P1_OUTPUT_COUNT" -eq 0 ]; then
+    echo "ERROR: P1 produced 0 usable scans."
+    echo "All scans may have been skipped, e.g. voxel size threshold."
+    echo "Stopping pipeline to avoid running downstream steps with empty inputs."
+    exit 1
+fi
+echo "P1 usable scans: $P1_OUTPUT_COUNT"
 
 echo ""
 echo "[OK] P1 preprocessing completed successfully"
@@ -163,6 +212,23 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+if [ "$SKIP_ALIGNMENT" = "True" ]; then
+    P2_OUTPUT_COUNT=$(count_matching_files "$PROCESSED_SCANS_DIR" ".*/[^/]+_CT_resampled_256\\.nii(\\.gz)?$")
+else
+    P2_OUTPUT_COUNT=$(count_matching_files "$PROCESSED_SCANS_DIR" ".*/[^/]+_aligned\\.nii(\\.gz)?$")
+fi
+
+if [ "$P2_OUTPUT_COUNT" -eq 0 ]; then
+    if [ "$SKIP_ALIGNMENT" = "True" ]; then
+        echo "ERROR: P2 produced 0 scans for downstream steps."
+    else
+        echo "ERROR: P2 produced 0 aligned scans."
+    fi
+    echo "Stopping pipeline to avoid empty-input processing."
+    exit 1
+fi
+echo "P2 scans available for P3: $P2_OUTPUT_COUNT"
+
 echo ""
 echo "[OK] P2 preprocessing completed successfully"
 echo ""
@@ -192,6 +258,14 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+P3_OUTPUT_COUNT=$(count_matching_files "$OUTPUT_DIR/Preprocessing/P3_Cropped_Ears" ".*/[^/]+_(left|right)_ear\\.nii(\\.gz)?$")
+if [ "$P3_OUTPUT_COUNT" -eq 0 ]; then
+    echo "ERROR: P3 produced 0 cropped ear volumes in $OUTPUT_DIR/Preprocessing/P3_Cropped_Ears"
+    echo "Stopping pipeline to avoid empty-input processing."
+    exit 1
+fi
+echo "P3 cropped ears: $P3_OUTPUT_COUNT"
+
 echo ""
 echo "[OK] P3 preprocessing completed successfully"
 echo ""
@@ -214,6 +288,14 @@ if [ $? -ne 0 ]; then
     echo "ERROR: P4 preprocessing failed!"
     exit 1
 fi
+
+P4_OUTPUT_COUNT=$(count_matching_files "$INFERENCE_SCANS_DIR" ".*/[^/]+_(left|right)_0000\\.nii(\\.gz)?$")
+if [ "$P4_OUTPUT_COUNT" -eq 0 ]; then
+    echo "ERROR: P4 produced 0 inference-ready volumes in $INFERENCE_SCANS_DIR"
+    echo "Stopping pipeline before inference."
+    exit 1
+fi
+echo "P4 inference-ready volumes: $P4_OUTPUT_COUNT"
 
 echo ""
 echo "[OK] P4 preprocessing completed successfully"
@@ -250,7 +332,7 @@ echo ""
 # STEP 6: Bone Segmentation Inference (nnU-Net)
 # ==============================================================================
 echo "=================================================="
-echo "STEP 6/8: Running Bone Segmentation Inference (nnU-Net)"
+echo "STEP 6/8: Running Bone Segmentation Inference - nnU-Net"
 echo "=================================================="
 echo "Input scans directory: $INFERENCE_SCANS_DIR"
 echo "Output directory: $BONE_INFERENCE_OUTPUT_DIR"
@@ -313,7 +395,7 @@ echo ""
 echo "=================================================="
 echo "STEP 8/8: Running Metric Extraction"
 echo "=================================================="
-echo "Switching to metric_env (conda) for metric extraction..."
+echo "Switching to metric_env for metric extraction..."
 eval "$(conda shell.bash hook)"
 conda activate metric_env
 

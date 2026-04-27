@@ -4,11 +4,11 @@
 # ./run_retrain_tissue_air.sh <CT_DIR> <JSON_DIR> <SEG_DIR> <HEATMAP_DIR> <LOG_DIR> <MODEL_DIR>
 
 # Central retraining directory
-RETRAIN_DIR="/kbnnfsserver/erhdata/Processed-Data/SBEO/Retrain"
+RETRAIN_DIR="/kbnnfsserver/erhdata/Processed-Data/SBEO/Retrain_Tissue_Air"
 
 
 # Default input/output directories
-CT_DIR=${1:-/kbnnfsserver/erhdata/Processed-Data/SBEO/Retrain/CTs_Raw}
+CT_DIR=${1:-/kbnnfsserver/erhdata/Processed-Data/SBEO/Retrain_Tissue_Air/CTs_Raw}
 JSON_DIR=${2:-/kbnnfsserver/erhdata/Raw/EarScans/Images/HECKTOR 2025 Training Data/Annotations/landmarks/ear_anatomical_landmarks_train}
 SEG_DIR=${3:-/kbnnfsserver/erhdata/Raw/EarScans/Images/HECKTOR 2025 Training Data/Annotations/segmentations/ear_masks_train}
 HEATMAP_DIR=${4:-$RETRAIN_DIR/Heatmaps}
