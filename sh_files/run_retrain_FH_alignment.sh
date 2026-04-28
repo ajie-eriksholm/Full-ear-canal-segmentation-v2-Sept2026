@@ -1,33 +1,67 @@
 #!/bin/bash
 
 # Usage:
-# ./run_retrain_FH_alignment.sh <CT_DIR> <JSON_DIR> <HEATMAP_DIR> <LOG_DIR> <MODEL_DIR>
+# ./run_retrain_FH_alignment.sh <CT_DIR> <JSON_DIR> <HEATMAP_DIR> <LOG_DIR> 
 
-# Central retraining directory
-RETRAIN_DIR="/kbnnfsserver/erhdata/Processed-Data/SBEO/Retrain_FH_Alignment"
 
-# Default input/output directories
-CT_DIR=${1:-/kbnnfsserver/erhdata/Processed-Data/SBEO/Retrain_FH_Alignment/CTs_Raw}
-JSON_DIR=${2:-/kbnnfsserver/erhdata/Raw/EarScans/Images/HECKTOR 2025 Training Data/Annotations/landmarks/fh_alignment_landmarks_train}
-HEATMAP_DIR=${3:-$RETRAIN_DIR/Heatmaps}
-LOG_DIR=${4:-$RETRAIN_DIR/Logs}
-MODEL_DIR=${5:-$RETRAIN_DIR/Models}
+# Directory paths
+RETRAIN_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/Retrain_FH_Alignment"
+RAW_SCANS_DIR="$RETRAIN_DIR/CTs_Raw"
+PROCESSED_SCANS_DIR="$RETRAIN_DIR/CTs_Processed"
+OUTPUT_DIR="$RETRAIN_DIR/Output"
+HEATMAP_DIR="$RETRAIN_DIR/Heatmaps"
+LOG_DIR="$RETRAIN_DIR/Logs"
+JSON_DIR="/projects/oticon/erhdata/Raw/EarScans/Images/HECKTOR 2025 Training Data/Annotations/landmarks/fh_alignment_landmarks_train"
+
+# Python environments
+SEG_ENV="./seg_env"
+LANDMARK_ENV="./landmark_env"
+
+# Preprocessing scripts location
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+PREPROCESSING_DIR="$PROJECT_ROOT/preprocessing"
+
+# Ensure output directories exist
+mkdir -p "$HEATMAP_DIR" "$LOG_DIR"
 
 set -e
 
-echo "Running P1 preprocessing..."
-python preprocessing/p1_preprocessing.py --raw_scans_dir "$CT_DIR" --processed_scans_dir "$RETRAIN_DIR/CTs_P1" --output_dir "$LOG_DIR"
+# ============================================================================== 
+# P1: Initial Preprocessing
+# ==============================================================================
+echo "=================================================="
+echo "STEP 1/4: Running P1 - Initial Preprocessing"
+echo "=================================================="
+echo "Activating seg_env for P1..."
+source "$SEG_ENV/bin/activate"
 
-# Use P1 output as input for heatmap creation
-P1_OUT="$RETRAIN_DIR/CTs_P1"
+python "$PREPROCESSING_DIR/p1_preprocessing.py" \
+  --raw_scans_dir "$RAW_SCANS_DIR" \
+  --processed_scans_dir "$PROCESSED_SCANS_DIR" \
+  --output_dir "$OUTPUT_DIR"
 
+deactivate
+echo "[OK] P1 preprocessing completed successfully"
+echo ""
+
+# ==============================================================================
+# Heatmap Generation
+# ==============================================================================
 echo "Generating heatmaps..."
-python utils/heatmap_creation.py --nii_dir "$P1_OUT" --json_dir "$JSON_DIR" --heatmap_dir "$HEATMAP_DIR"
+source "$LANDMARK_ENV/bin/activate"
+python "$PROJECT_ROOT/utils/heatmap_creation.py" --nii_dir "$PROCESSED_SCANS_DIR" --json_dir "$JSON_DIR" --heatmap_dir "$HEATMAP_DIR" --fh_alignment
+echo "[OK] Heatmap generation completed"
 
+# ============================================================================== 
+# Training
+# ==============================================================================
 echo "Starting FH alignment training..."
-python model/train_FH_alignment.py \
-  --ct_dir "$P1_OUT" \
+python "$PROJECT_ROOT/model/train_FH_alignment.py" \
+  --ct_dir "$PROCESSED_SCANS_DIR" \
   --json_dir "$JSON_DIR" \
   --heatmap_dir "$HEATMAP_DIR" \
   --log_dir "$LOG_DIR" \
-  --model_dir "$MODEL_DIR"
+  --fh_alignment
+
+

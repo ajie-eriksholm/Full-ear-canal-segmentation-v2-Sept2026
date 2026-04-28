@@ -18,7 +18,7 @@ import random
 BATCH_SIZE = 1
 NUM_WORKERS = 8
 LR = 1e-4
-MAX_EPOCHS = 500
+MAX_EPOCHS = 3
 COMPUTE_FULL_METRICS_EVERY_N_EPOCHS = 1  # Compute metrics on all batches every N epochs
 SEED = 42
 
@@ -26,24 +26,42 @@ SEED = 42
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 random.seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
 
-# Initialize CUDA / cuDNN
-if torch.cuda.is_available():
-    # don't call non-existent torch.cuda.init()
-    torch.backends.cudnn.benchmark = True  # enable cuDNN autotuner (good for fixed-size inputs)
-    torch.backends.cudnn.enabled = True
-    torch.cuda.empty_cache()
-    DEVICE = torch.device('cuda')
+# Robust device selection: fallback to CPU if CUDA is not usable
+
+def get_cuda_compute_capability():
     try:
-        dev_name = torch.cuda.get_device_name(0)
+        # Returns a tuple (major, minor)
+        cap = torch.cuda.get_device_capability(0)
+        return cap[0] + cap[1] / 10.0
     except Exception:
-        dev_name = "cuda"
-    print(f"Using device: {DEVICE} - {dev_name}")
-else:
+        return 0.0
+
+try:
+    if torch.cuda.is_available():
+        compute_cap = get_cuda_compute_capability()
+        # PyTorch >=2.3 supports only 7.0+ by default
+        if compute_cap >= 7.0:
+            torch.cuda.manual_seed_all(SEED)
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.enabled = True
+            torch.cuda.empty_cache()
+            _ = torch.tensor([0.0]).to('cuda')
+            DEVICE = torch.device('cuda')
+            try:
+                dev_name = torch.cuda.get_device_name(0)
+            except Exception:
+                dev_name = "cuda"
+            print(f"Using device: {DEVICE} - {dev_name}")
+        else:
+            print(f"WARNING: CUDA device compute capability {compute_cap} is not supported by this PyTorch build. Using CPU instead.")
+            DEVICE = torch.device('cpu')
+            print("Using device: cpu")
+    else:
+        raise RuntimeError("CUDA not available")
+except Exception as e:
     DEVICE = torch.device('cpu')
-    print("Using device: cpu")
+    print(f"Using device: cpu (reason: {e})")
 
 
 # ---------------------------
@@ -56,14 +74,14 @@ def parse_args():
     parser.add_argument('--json_dir', type=str, required=True, help='Directory with ground truth JSONs (not used directly, but for reference)')
     parser.add_argument('--heatmap_dir', type=str, required=True, help='Directory with precomputed heatmaps')
     parser.add_argument('--log_dir', type=str, required=True, help='Directory to save logs and tensorboard runs')
-    parser.add_argument('--model_dir', type=str, required=True, help='Directory to save trained models')
     parser.add_argument('--split_csv', type=str, default=None, help='CSV file with train/val split (optional)')
+    parser.add_argument('--fh_alignment', action='store_true', help='Enable folder-based logic for FH alignment retraining')
     return parser.parse_args()
 
 args = None
 if __name__ == '__main__':
     args = parse_args()
-    pred_dir = args.model_dir
+    pred_dir = args.log_dir  # save predictions here for visualization
     os.makedirs(pred_dir, exist_ok=True)
     base_log_dir = args.log_dir
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -97,26 +115,40 @@ def load_nii(nii_path: str):
 # Dataset
 # ---------------------------
 class LandmarkDataset(Dataset):
-    def __init__(self, nii_dir, heatmap_dir):
+    def __init__(self, nii_dir, heatmap_dir, fh_alignment=False):
         self.nii_dir = nii_dir
         self.heatmap_dir = heatmap_dir
-        self.nii_files = sorted([f for f in os.listdir(nii_dir) if f.endswith('.nii.gz')])
+        self.fh_alignment = fh_alignment
+        if fh_alignment:
+            # Recursively find all *_CT_resampled_256.nii.gz files in subfolders
+            self.nii_files = []
+            for root, dirs, files in os.walk(nii_dir):
+                for f in files:
+                    if f.endswith('_CT_resampled_256.nii.gz'):
+                        # Store relative path from nii_dir for compatibility
+                        rel_path = os.path.relpath(os.path.join(root, f), nii_dir)
+                        self.nii_files.append(rel_path)
+            self.nii_files.sort()
+        else:
+            self.nii_files = sorted([f for f in os.listdir(nii_dir) if f.endswith('.nii.gz')])
 
     def __len__(self):
         return len(self.nii_files)
 
     def __getitem__(self, idx):
         # Load CT scan
-        nii_path = os.path.join(self.nii_dir, self.nii_files[idx])
+        if self.fh_alignment:
+            nii_path = os.path.join(self.nii_dir, self.nii_files[idx])
+            # For heatmap, get patient_id from filename (e.g., CHUM-021_CT_resampled_256.nii.gz)
+            patient_id = os.path.basename(self.nii_files[idx]).split('_CT_resampled_256.nii.gz')[0]
+            heatmap_name = f"{patient_id}_heatmaps.pt"
+        else:
+            nii_path = os.path.join(self.nii_dir, self.nii_files[idx])
+            heatmap_name = self.nii_files[idx].replace('.nii.gz', '_heatmaps.pt')
+
         img_tensor, affine = load_nii(nii_path)  # img_tensor shape (1, D, H, W)
-
-        # Load precomputed heatmaps (torch .pt) - assume shape (num_landmarks, D, H, W)
-        heatmap_name = self.nii_files[idx].replace('.nii.gz', '_heatmaps.pt')
         heatmap_path = os.path.join(self.heatmap_dir, heatmap_name)
-        # torch.load does not accept weights_only/mmap kwargs; load to CPU then move to device later
         heatmaps = torch.load(heatmap_path, map_location='cpu').float()
-
-        # return as tensors; DataLoader will collate into batch dimension
         return img_tensor, heatmaps, torch.from_numpy(affine).float()
 
 # ---------------------------
@@ -304,8 +336,8 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs=MAX_EPOCHS
             data_load_time += (data_end - batch_start)
 
             # Move to device. imgs shape: (B,1,D,H,W) from dataset
-            imgs = imgs.to(DEVICE, non_blocking=True)
-            heatmaps = heatmaps.to(DEVICE, non_blocking=True)
+            imgs = imgs.to(DEVICE, non_blocking=(DEVICE.type == "cuda"))
+            heatmaps = heatmaps.to(DEVICE, non_blocking=(DEVICE.type == "cuda"))
             orig_affine = affines[0].cpu().numpy()
 
             optimizer.zero_grad()
@@ -346,8 +378,8 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs=MAX_EPOCHS
 
                 with torch.no_grad():
                     for imgs, heatmaps, affines in tqdm(train_loader, desc=f"Computing full train metrics", leave=False):
-                        imgs = imgs.to(DEVICE, non_blocking=True)
-                        heatmaps = heatmaps.to(DEVICE, non_blocking=True)
+                        imgs = imgs.to(DEVICE, non_blocking=(DEVICE.type == "cuda"))
+                        heatmaps = heatmaps.to(DEVICE, non_blocking=(DEVICE.type == "cuda"))
                         orig_affine = affines[0].cpu().numpy()
 
                         logits = model(imgs)
@@ -367,8 +399,8 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs=MAX_EPOCHS
                 # Visualization on first batch
                 first_batch = next(iter(train_loader))
                 imgs, heatmaps, affines = first_batch
-                imgs = imgs.to(DEVICE, non_blocking=True)
-                heatmaps = heatmaps.to(DEVICE, non_blocking=True)
+                imgs = imgs.to(DEVICE, non_blocking=(DEVICE.type == "cuda"))
+                heatmaps = heatmaps.to(DEVICE, non_blocking=(DEVICE.type == "cuda"))
                 orig_affine = affines[0].cpu().numpy()
                 with torch.no_grad():
                     logits = model(imgs)
@@ -382,8 +414,8 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs=MAX_EPOCHS
                 # Only compute on first batch (cheaper)
                 first_batch = next(iter(train_loader))
                 imgs, heatmaps, affines = first_batch
-                imgs = imgs.to(DEVICE, non_blocking=True)
-                heatmaps = heatmaps.to(DEVICE, non_blocking=True)
+                imgs = imgs.to(DEVICE, non_blocking=(DEVICE.type == "cuda"))
+                heatmaps = heatmaps.to(DEVICE, non_blocking=(DEVICE.type == "cuda"))
                 orig_affine = affines[0].cpu().numpy()
 
                 metric_start = time.time()
@@ -440,8 +472,8 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs=MAX_EPOCHS
                 val_distances_px_list = []
                 with torch.no_grad():
                     for imgs, heatmaps, affines in tqdm(val_loader, desc=f"Computing full val metrics", leave=False):
-                        imgs = imgs.to(DEVICE, non_blocking=True)
-                        heatmaps = heatmaps.to(DEVICE, non_blocking=True)
+                        imgs = imgs.to(DEVICE, non_blocking=(DEVICE.type == "cuda"))
+                        heatmaps = heatmaps.to(DEVICE, non_blocking=(DEVICE.type == "cuda"))
                         orig_affine = affines[0].cpu().numpy()
 
                         logits = model(imgs)
@@ -460,7 +492,7 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs=MAX_EPOCHS
                 # visualization on first val batch
                 first_batch = next(iter(val_loader))
                 imgs, heatmaps, affines = first_batch
-                imgs = imgs.to(DEVICE, non_blocking=True)
+                imgs = imgs.to(DEVICE, non_blocking=(DEVICE.type == "cuda"))
                 heatmaps = heatmaps.to(DEVICE, non_blocking=True)
                 orig_affine = affines[0].cpu().numpy()
                 with torch.no_grad():
@@ -547,37 +579,72 @@ def train(train_loader, val_loader, model, optimizer, loss_fn, epochs=MAX_EPOCHS
 # ---------------------------
 if __name__ == '__main__':
     # Use argparse-provided paths
+
     nii_dir = args.ct_dir
     heatmap_dir = args.heatmap_dir
     landmark_ids = [8, 9, 10, 11, 12, 13]
     split_csv = args.split_csv
+    fh_alignment = getattr(args, 'fh_alignment', False)
     output_model_path = os.path.join(pred_dir, f"best_model_{timestamp}.pth")
 
-    if split_csv is not None and os.path.exists(split_csv):
-        df = pd.read_csv(split_csv)
-        train_scans = df[df['split'].str.startswith('train')]['scan_name'].tolist()
-        val_scans = df[df['split'].str.startswith('val')]['scan_name'].tolist()
-        full_dataset = LandmarkDataset(nii_dir, heatmap_dir)
+    import random
+    import csv
+    # If split_csv is not provided or does not exist, create one with 85% train, 15% val
+    if not split_csv or not os.path.exists(split_csv):
+        print("[INFO] No split CSV provided or found. Creating a random 85%/15% train/val split.")
+        full_dataset = LandmarkDataset(nii_dir, heatmap_dir, fh_alignment=fh_alignment)
+        all_files = full_dataset.nii_files
+        random.shuffle(all_files)
+        n_total = len(all_files)
+        n_train = int(n_total * 0.85)
+        train_files = all_files[:n_train]
+        val_files = all_files[n_train:]
+        split_csv_path = split_csv if split_csv else os.path.join(run_log_dir, 'auto_split.csv')
+        with open(split_csv_path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['scan_name', 'split'])
+            for f in train_files:
+                writer.writerow([f, 'train'])
+            for f in val_files:
+                writer.writerow([f, 'val'])
+        print(f"[INFO] Auto-generated split CSV at: {split_csv_path}")
+        split_csv = split_csv_path
+
+    # Now load the split CSV
+    df = pd.read_csv(split_csv)
+    train_scans = df[df['split'].str.startswith('train')]['scan_name'].tolist()
+    val_scans = df[df['split'].str.startswith('val')]['scan_name'].tolist()
+    full_dataset = LandmarkDataset(nii_dir, heatmap_dir, fh_alignment=fh_alignment)
+    # For FH alignment, match full relative path; for flat, match filename
+    if fh_alignment:
+        train_indices = [i for i, f in enumerate(full_dataset.nii_files) if f in train_scans]
+        val_indices = [i for i, f in enumerate(full_dataset.nii_files) if f in val_scans]
+    else:
         train_indices = [i for i, f in enumerate(full_dataset.nii_files) if f.split('__')[0] in train_scans]
         val_indices = [i for i, f in enumerate(full_dataset.nii_files) if f.split('__')[0] in val_scans]
-        print(f"Total files in dataset: {len(full_dataset.nii_files)}")
-        print(f"Training files: {len(train_indices)}")
-        print(f"Validation files: {len(val_indices)}")
-        train_dataset = torch.utils.data.Subset(full_dataset, train_indices)
-        val_dataset = torch.utils.data.Subset(full_dataset, val_indices)
+    print(f"Total files in dataset: {len(full_dataset.nii_files)}")
+    print(f"Training files: {len(train_indices)}")
+    print(f"Validation files: {len(val_indices)}")
+    train_dataset = torch.utils.data.Subset(full_dataset, train_indices)
+    val_dataset = torch.utils.data.Subset(full_dataset, val_indices)
+
+
+    # Adjust DataLoader settings for CPU
+    if DEVICE.type == "cpu":
+        dl_num_workers = 0
+        dl_pin_memory = False
+        dl_persistent_workers = False
     else:
-        # If no split CSV, use all data for training, no validation
-        full_dataset = LandmarkDataset(nii_dir, heatmap_dir)
-        print(f"Total files in dataset: {len(full_dataset.nii_files)}")
-        train_dataset = full_dataset
-        val_dataset = torch.utils.data.Subset(full_dataset, [])
+        dl_num_workers = NUM_WORKERS
+        dl_pin_memory = True
+        dl_persistent_workers = True if NUM_WORKERS > 0 else False
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-                              num_workers=NUM_WORKERS, pin_memory=True,
-                              persistent_workers=True if NUM_WORKERS > 0 else False)
+                              num_workers=dl_num_workers, pin_memory=dl_pin_memory,
+                              persistent_workers=dl_persistent_workers)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,
-                            num_workers=NUM_WORKERS, pin_memory=True,
-                            persistent_workers=True if NUM_WORKERS > 0 else False)
+                            num_workers=dl_num_workers, pin_memory=dl_pin_memory,
+                            persistent_workers=dl_persistent_workers)
 
     model = UNet3D(in_channels=1, out_channels=len(landmark_ids), base_features=16)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
