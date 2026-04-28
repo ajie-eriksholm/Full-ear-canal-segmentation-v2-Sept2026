@@ -9,14 +9,29 @@ from scipy.ndimage import gaussian_filter
 import nibabel as nib
 import argparse
 
+
 SIGMA = 3
-landmark_ids = [8, 9, 10, 11, 12, 13]  # your landmark IDs
+
+parser = argparse.ArgumentParser(description="Precompute landmark heatmaps from CT and JSON markups.")
+parser.add_argument('--nii_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_CTs_resampled_128", help='Directory with input NIfTI files')
+parser.add_argument('--json_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_Markups_Corrected", help='Directory with input JSON markup files')
+parser.add_argument('--heatmap_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Precomputed_Heatmaps_resampled_128_Corrected", help='Output directory for heatmaps')
+parser.add_argument('--nnunet', action='store_true', help='If set, strip _0000 from NIfTI filenames when searching for JSON')
+parser.add_argument('--fh_alignment', action='store_true', help='Enable folder-based logic for FH alignment retraining')
+args = parser.parse_args()
+
+# Set landmark_ids based on mode
+if args.fh_alignment:
+    landmark_ids = [8, 9, 10, 11, 12, 13]
+else:
+    landmark_ids = [1, 2, 3, 4, 5, 6, 7]
 
 
 parser = argparse.ArgumentParser(description="Precompute landmark heatmaps from CT and JSON markups.")
 parser.add_argument('--nii_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_CTs_resampled_128", help='Directory with input NIfTI files')
 parser.add_argument('--json_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_Markups_Corrected", help='Directory with input JSON markup files')
 parser.add_argument('--heatmap_dir', type=str, default="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Subset_100_all_Precomputed_Heatmaps_resampled_128_Corrected", help='Output directory for heatmaps')
+parser.add_argument('--nnunet', action='store_true', help='If set, strip _0000 from NIfTI filenames when searching for JSON')
 parser.add_argument('--fh_alignment', action='store_true', help='Enable folder-based logic for FH alignment retraining')
 args = parser.parse_args()
 
@@ -36,7 +51,25 @@ if args.fh_alignment:
         if not os.path.exists(nii_path):
             print(f"[WARN] NIfTI not found for patient {patient_id}: {nii_path}")
             continue
-        json_path = os.path.join(json_dir, f"{patient_id}.json")
+        # If --nnunet is set and patient_id ends with _0000, strip it for JSON lookup
+        json_patient_id = patient_id
+        if args.nnunet and patient_id.endswith('_0000'):
+            json_patient_id = patient_id[:-5]
+        # Look for all four JSON naming patterns
+        json_path_json = os.path.join(json_dir, f"{json_patient_id}.json")
+        json_path_mrk = os.path.join(json_dir, f"{json_patient_id}.mrk.json")
+        json_path_json_ear = os.path.join(json_dir, f"{json_patient_id}_ear.json")
+        json_path_mrk_ear = os.path.join(json_dir, f"{json_patient_id}_ear.mrk.json")
+        if os.path.exists(json_path_json):
+            json_path = json_path_json
+        elif os.path.exists(json_path_mrk):
+            json_path = json_path_mrk
+        elif os.path.exists(json_path_json_ear):
+            json_path = json_path_json_ear
+        elif os.path.exists(json_path_mrk_ear):
+            json_path = json_path_mrk_ear
+        else:
+            json_path = json_path_json  # fallback for warning message
         heatmap_path = os.path.join(heatmap_dir, f"{patient_id}_heatmaps.pt")
         
 
@@ -44,8 +77,8 @@ if args.fh_alignment:
             print(f"Skipping {nii_file} - heatmap already exists")
             continue
 
-        if not os.path.exists(json_path):
-            print(f"[WARN] JSON markup not found for {nii_file}: {json_path}")
+        if not (os.path.exists(json_path_json) or os.path.exists(json_path_mrk) or os.path.exists(json_path_json_ear) or os.path.exists(json_path_mrk_ear)):
+            print(f"[WARN] JSON markup not found for {nii_file}: tried {json_path_json}, {json_path_mrk}, {json_path_json_ear}, {json_path_mrk_ear}")
             continue
 
         try:
@@ -89,6 +122,7 @@ if args.fh_alignment:
         torch.save(heatmaps, heatmap_path)
 else:
     # Original logic (flat nii_dir)
+
     for nii_file in sorted(os.listdir(nii_dir)):
         if not nii_file.endswith('.nii.gz'):
             continue
@@ -100,16 +134,37 @@ else:
         else:
             patient_id = nii_base  # fallback if no __CT
 
-        json_path = os.path.join(json_dir, f"{patient_id}.json")
+        # If --nnunet is set and patient_id ends with _0000, strip it for JSON lookup
+        json_patient_id = patient_id
+        if args.nnunet and patient_id.endswith('_0000'):
+            json_patient_id = patient_id[:-5]
+
+
+        # Look for all four JSON naming patterns
+        json_path_json = os.path.join(json_dir, f"{json_patient_id}.json")
+        json_path_mrk = os.path.join(json_dir, f"{json_patient_id}.mrk.json")
+        json_path_json_ear = os.path.join(json_dir, f"{json_patient_id}_ear.json")
+        json_path_mrk_ear = os.path.join(json_dir, f"{json_patient_id}_ear.mrk.json")
+        if os.path.exists(json_path_json):
+            json_path = json_path_json
+        elif os.path.exists(json_path_mrk):
+            json_path = json_path_mrk
+        elif os.path.exists(json_path_json_ear):
+            json_path = json_path_json_ear
+        elif os.path.exists(json_path_mrk_ear):
+            json_path = json_path_mrk_ear
+        else:
+            json_path = json_path_json  # fallback for warning message
+
         heatmap_path = os.path.join(heatmap_dir, f"{patient_id}_heatmaps.pt")
-        
 
         if os.path.exists(heatmap_path):
             print(f"Skipping {nii_file} - heatmap already exists")
             continue
 
-        if not os.path.exists(json_path):
-            print(f"[WARN] JSON markup not found for {nii_file}: {json_path}")
+
+        if not (os.path.exists(json_path_json) or os.path.exists(json_path_mrk) or os.path.exists(json_path_json_ear) or os.path.exists(json_path_mrk_ear)):
+            print(f"[WARN] JSON markup not found for {nii_file}: tried {json_path_json}, {json_path_mrk}, {json_path_json_ear}, {json_path_mrk_ear}")
             continue
 
         try:

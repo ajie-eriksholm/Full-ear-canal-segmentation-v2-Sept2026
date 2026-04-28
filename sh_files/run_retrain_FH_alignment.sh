@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # Usage:
-# ./run_retrain_FH_alignment.sh <CT_DIR> <JSON_DIR> <HEATMAP_DIR> <LOG_DIR> 
+# ./run_retrain_FH_alignment.sh <CT_DIR> <JSON_DIR> <HEATMAP_DIR> <LOG_DIR>
+# bash sh_files/run_retrain_FH_alignment.sh 
 
 
 # Directory paths

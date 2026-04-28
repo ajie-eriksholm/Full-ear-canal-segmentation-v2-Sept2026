@@ -5,6 +5,7 @@
 # ============================================================================== 
 # This script runs all preprocessing steps (P1-P4) in sequence, then starts training.
 # Edit the variables below to customize paths and settings
+# bash sh_files/run_retrain_tissue_air.sh
 # ==============================================================================
 
 # Directory paths
@@ -26,8 +27,8 @@ PRE_QUALITY_ASSESSED="False"
 EXCLUDED_SCANS_CSV="/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Excluded_scans_cropping.csv"
 
 # Python environments
-SEG_ENV="/home/sbeo/Full-ear-canal-segmentation/seg_env"
-LANDMARK_ENV="/home/sbeo/Full-ear-canal-segmentation/landmark_env"
+SEG_ENV="./seg_env"
+LANDMARK_ENV="./landmark_env"
 
 
 # Preprocessing scripts location
@@ -117,7 +118,7 @@ echo ""
 # Heatmap Generation
 # ==============================================================================
 echo "Generating heatmaps..."
-python "$PROJECT_ROOT/utils/heatmap_creation.py" --nii_dir "$OUTPUT_DIR/Preprocessing/P4_Normalized_Ears" --json_dir "$JSON_DIR" --heatmap_dir "$HEATMAP_DIR"
+python "$PROJECT_ROOT/utils/heatmap_creation.py" --nii_dir "$OUTPUT_DIR/Preprocessing/P4_Normalized_Ears" --json_dir "$JSON_DIR" --heatmap_dir "$HEATMAP_DIR" --nnunet
 
 # ============================================================================== 
 # Training

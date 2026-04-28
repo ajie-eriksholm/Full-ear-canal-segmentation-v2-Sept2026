@@ -659,7 +659,7 @@ This will:
 You can override the default directories by passing arguments to the script:
 
 ```bash
-bash run_retrain_tissue_air.sh <CT_DIR> <JSON_DIR> <SEG_DIR> <HEATMAP_DIR> <LOG_DIR> <MODEL_DIR>
+bash run_retrain_tissue_air.sh <CT_DIR> <JSON_DIR> <SEG_DIR> <HEATMAP_DIR> <LOG_DIR>
 ```
 For example:
 ```bash
