@@ -601,8 +601,7 @@ If you want to retrain the FH alignment model (for example, to add more data or 
 Use the provided shell script to run P1 preprocessing, generate heatmaps, and start training:
 
 ```bash
-cd sh_files
-bash run_retrain_FH_alignment.sh
+bash sh_files/run_retrain_FH_Alignment.sh
 ```
 
 This will:
@@ -645,8 +644,7 @@ If you want to retrain the tissue/air segmentation and landmark placement model 
 Use the provided shell script to run the **full preprocessing pipeline (P1–P4)**, generate heatmaps, and start training:
 
 ```bash
-cd sh_files
-bash run_retrain_tissue_air.sh
+bash sh_files/run_retrain_tissue_air.sh
 ```
 
 This will:

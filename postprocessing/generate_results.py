@@ -57,6 +57,30 @@ BONE_LANDMARK_LABELS = {
     6: (14, "CBJ4"),
 }
 
+NIFTI_EXTENSIONS = ('.nii.gz', '.nii')
+
+
+def strip_nifti_extension(filename):
+    """Strip .nii or .nii.gz extension from a filename."""
+    for ext in NIFTI_EXTENSIONS:
+        if filename.endswith(ext):
+            return filename[:-len(ext)]
+    return filename
+
+
+def list_nifti_files(directory):
+    """List NIfTI files (.nii or .nii.gz) in a directory."""
+    return sorted(f for f in os.listdir(directory) if f.endswith(NIFTI_EXTENSIONS))
+
+
+def get_pred_seg_base_name(filename):
+    """Return base scan name for <name>_pred_seg.nii[.gz], else None."""
+    stem = strip_nifti_extension(filename)
+    suffix = '_pred_seg'
+    if not stem.endswith(suffix):
+        return None
+    return stem[:-len(suffix)]
+
 
 def save_stl_binary(vertices, faces, filepath):
     """Write a binary STL file from vertices and faces arrays."""
@@ -145,14 +169,14 @@ def extract_bone_landmarks(bone_masks_directory):
     if not bone_masks_directory or not os.path.isdir(bone_masks_directory):
         return bone_landmarks
 
-    nii_files = sorted(f for f in os.listdir(bone_masks_directory) if f.endswith(".nii.gz"))
+    nii_files = list_nifti_files(bone_masks_directory)
     for fname in nii_files:
         nii = nib.load(os.path.join(bone_masks_directory, fname))
         data = nii.get_fdata().astype(np.int16)
         affine = nii.affine
 
         # Parse patient and ear_side from filename (e.g. "patient_left.nii.gz")
-        base = fname.replace(".nii.gz", "")
+        base = strip_nifti_extension(fname)
         # Handle nnU-Net output names which may or may not have _0000
         if base.endswith("_0000"):
             base = base[:-5]
@@ -194,9 +218,9 @@ def process_bone_masks():
     os.makedirs(output_dir_masks_bone, exist_ok=True)
     os.makedirs(output_dir_stl_bone, exist_ok=True)
 
-    nii_files = sorted(f for f in os.listdir(bone_masks_dir) if f.endswith(".nii.gz"))
+    nii_files = list_nifti_files(bone_masks_dir)
     if not nii_files:
-        print("No .nii.gz files found in bone_masks_dir.")
+        print("No .nii or .nii.gz files found in bone_masks_dir.")
         return
 
     processed = 0
@@ -212,7 +236,7 @@ def process_bone_masks():
             continue
 
         # Clean base name (strip _0000 if present)
-        base = fname.replace(".nii.gz", "")
+        base = strip_nifti_extension(fname)
         if base.endswith("_0000"):
             base = base[:-5]
 
@@ -235,14 +259,14 @@ def process_masks():
     os.makedirs(output_dir_masks, exist_ok=True)
     os.makedirs(output_dir_stl, exist_ok=True)
 
-    mask_files = sorted(f for f in os.listdir(masks_dir) if f.endswith("_pred_seg.nii.gz"))
+    mask_files = sorted(f for f in os.listdir(masks_dir) if get_pred_seg_base_name(f) is not None)
     if not mask_files:
-        print("No *_pred_seg.nii.gz files found in masks_dir.")
+        print("No *_pred_seg.nii or *_pred_seg.nii.gz files found in masks_dir.")
         return
 
     processed = 0
     for mask_file in mask_files:
-        base_name = mask_file.replace("_pred_seg.nii.gz", "")
+        base_name = get_pred_seg_base_name(mask_file)
         mask_path = os.path.join(masks_dir, mask_file)
 
         # Load NIfTI mask
@@ -304,8 +328,9 @@ def main():
     pred_df = pd.read_csv(predicted_landmarks)
     # scan_name looks like "CHUM-001_left.nii.gz" (after _0000 stripping)
     # Extract patient and ear_side
-    pred_df["patient"] = pred_df["scan_name"].str.replace(".nii.gz", "", regex=False).str.rsplit("_", n=1).str[0]
-    pred_df["ear_side"] = pred_df["scan_name"].str.replace(".nii.gz", "", regex=False).str.rsplit("_", n=1).str[1]
+    pred_df["scan_name_stem"] = pred_df["scan_name"].apply(strip_nifti_extension)
+    pred_df["patient"] = pred_df["scan_name_stem"].str.rsplit("_", n=1).str[0]
+    pred_df["ear_side"] = pred_df["scan_name_stem"].str.rsplit("_", n=1).str[1]
 
     # --- Load FH plane landmarks (8-13) ---
     if fh_available:
