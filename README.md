@@ -672,6 +672,112 @@ To improve training, simply add more CTs, segmentation masks, and landmark JSONs
 
 ---
 
+## Webpage Feature Preparation (`webpage_features_setup/all_features_extraction.py`)
+
+**Environment:** `metric_env` (conda)
+
+This script bundles every per-ear artefact required by the visualisation webpage into a
+single, **pseudonymised** package: a feature CSV, smoothed STL meshes (canal + outer
+block), centerline VTKs, and landmark JSONs. It combines the centerline metrics
+produced by `metric_extraction/` with demographics from a metadata CSV and computes
+additional geometric features (bend angles, sagittal arcs, clipped sub-volumes,
+radius ratios, etc.) directly from the meshes and markups.
+
+### What It Produces
+
+For an `output_dir`:
+
+```
+output_dir/
+├── all_ear_canal_features.csv        # one row per ear, fully pseudonymised
+├── stl_webpage/                       # canal STL meshes (renamed by pseudonym)
+├── stl_webpage_block/                 # smoothed solid-block STL from inverted mask
+├── vtk_webpage/                       # centerline_refined.vtk + centerline_features.vtk
+├── markup_webpage/                    # landmark JSONs (renamed by pseudonym)
+├── excluded_participants.txt          # ears dropped (missing CSV / output values)
+└── volume_diagnostics.txt             # per-ear notes for any failed volume metrics
+```
+
+A central pseudonymisation map is maintained at
+`pseudonym_dir/patient_id_mapping.csv` (default:
+`/projects/oticon/erhdata/Output/SBEO/pseudonymization`). Pseudonyms are assigned
+**per patient** (not per ear) as `patient_00001`, `patient_00002`, … and are
+suffixed with `_left` / `_right` for the ear-level outputs (e.g.
+`patient_00042_left`). The mapping is incrementally extended across runs so that
+the same patient always receives the same pseudonym across datasets.
+
+### Required Inputs
+
+The script expects an input directory laid out exactly like the metric-extraction
+output:
+
+```
+input_dir/
+├── processing_results.csv             # centerline features (from metric_extraction)
+├── vtk/                               # *_centerline_refined.vtk, *_centerline_features.vtk
+├── markups/                           # *.json (landmarks + cross-section indices, incl. CBJ)
+├── stl/                               # *_open_surface_cut_eardrum.stl
+└── masks/                             # *_inverted.nii.gz (used to build the block STL)
+```
+
+A separate metadata CSV (or list of CSVs) supplies `age` and `sex`. The patient
+ID column and age/sex columns are auto-detected, but you can override them via
+the `META_PATIENT_ID_COL`, `META_AGE_COL`, and `META_SEX_COL` constants at the
+top of the script. Age strings such as `048Y` (TCIA format) and sex strings such
+as `M`/`F`/`Male`/`Female` are normalised automatically.
+
+### Configuration
+
+All paths are configured at the top of
+[webpage_features_setup/all_features_extraction.py](webpage_features_setup/all_features_extraction.py):
+
+```python
+input_dir     = "/path/to/Metrics"                       # metric_extraction output
+metadata_csv  = ["/path/to/metadata.csv"]                # one or more files
+output_dir    = "/path/to/Features_csv/<dataset_name>"
+pseudonym_dir = "/projects/oticon/erhdata/Output/SBEO/pseudonymization"
+```
+
+> Keep `pseudonym_dir` pointing at the **shared** location so pseudonyms remain
+> consistent across all datasets and projects.
+
+### Running
+
+```bash
+conda activate metric_env
+python webpage_features_setup/all_features_extraction.py
+```
+
+The script will:
+
+1. Load (or create) the central pseudonym mapping and extend it with any new patients.
+2. Read `processing_results.csv` and discover all ears from the `markups/` folder.
+3. Skip ears with missing values in the centerline CSV (logged in `excluded_participants.txt`).
+4. For each remaining ear, compute the full feature set (lengths, distances,
+   radius ratios, bend/sagittal/entrance angles, CBJ position and plane angle,
+   and five clipped sub-volumes from the canal STL).
+5. Drop any ear whose required output columns (everything except `age`/`sex`)
+   are still missing — these are also recorded in `excluded_participants.txt`.
+6. Copy the canal STL, generate a smoothed block STL from the inverted mask,
+   and copy the two centerline VTKs and the markup JSON, all renamed with the
+   ear-level pseudonym (`patient_XXXXX_left|right`).
+7. Write `all_ear_canal_features.csv` with pseudonymised `patient_id` and `EarID`
+   columns and the exact column order expected by the webpage.
+
+### Notes
+
+- Only `age` and `sex` are allowed to be empty in the output CSV. Any other
+  missing field causes the ear to be excluded.
+- Block STLs are scaled from millimetres to metres (ANSYS convention) and
+  smoothed with a windowed-sinc + Laplacian pass (sigma ≈ 1.5).
+- Volume features rely on the cross-section planes stored in the markup JSON
+  (`isthmus`, `1st_bend`, `2nd_bend`, `eardrum`, and optionally `cbj`). Failures
+  for individual volume metrics are reported in `volume_diagnostics.txt`.
+- Re-running the script is safe: existing pseudonyms are preserved and only new
+  patients are added to the mapping.
+
+---
+
 ## References
 
 - **TotalSegmentator:** Wasserthal et al. (2023). TotalSegmentator: Robust Segmentation of 104 Anatomic Structures in CT Images. *Radiology: Artificial Intelligence*. https://doi.org/10.1148/ryai.230024
