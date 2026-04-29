@@ -1,6 +1,34 @@
 
 # Full Ear Canal Segmentation
 
+## Table of Contents
+
+- [Introduction](#introduction)
+  - [Input Requirements](#input-requirements)
+- [Environment Setup](#environment-setup)
+  - [Automatic Setup (Recommended)](#automatic-setup-recommended)
+  - [Manual Setup](#manual-setup)
+- [Running the Full Pipeline](#running-the-full-pipeline)
+  - [Configuration Options](#configuration-options)
+- [Output Folder Organization](#output-folder-organization)
+- [Pipeline Details](#pipeline-details)
+  - [Preprocessing (P1 → P2 → P3 → P4)](#preprocessing-p1--p2--p3--p4)
+    - [P1: Initial Preprocessing](#p1-initial-preprocessing-p1_preprocessingpy)
+    - [P2: Landmark Detection & Alignment](#p2-landmark-detection--alignment-p2_preprocessingpy)
+    - [P3: Ear ROI Cropping](#p3-ear-roi-cropping-p3_preprocessingpy)
+    - [P4: Upsampling & Normalization](#p4-upsampling--normalization-p4_preprocessingpy)
+  - [Inference](#inference-modeltest_tissue_airpy)
+  - [Bone Segmentation Inference](#bone-segmentation-inference-modeltest_bonepy)
+  - [Postprocessing](#postprocessing-postprocessinggenerate_resultspy)
+  - [Metric Extraction](#metric-extraction-metric_extractionpipelinepy)
+- [Retraining Scripts](#retraining-scripts)
+  - [Retraining FH Alignment Model](#retraining-fh-alignment-model)
+  - [Retraining Tissue vs Air Segmentation and Landmark Placement](#retraining-tissue-vs-air-segmentation-and-landmark-placement)
+- [Webpage Feature Preparation](#webpage-feature-preparation-webpage_features_setupall_features_extractionpy)
+- [References](#references)
+
+---
+
 ## Introduction
 
 This repository contains a complete end-to-end pipeline for **ear canal segmentation** and **anatomical landmark detection** from CT scans. Starting from raw NIfTI CT scans of the head, it produces 3D surface meshes (STL) of the ear canal along with anatomical landmark coordinates.
