@@ -19,6 +19,13 @@ TARGET_SHAPE = (128, 128, 128)
 MIN_HU = -1000
 MAX_HU = 2007
 
+NIFTI_EXTENSIONS = ('.nii.gz', '.nii')
+
+
+def with_all_nifti_extensions(base_path_without_ext):
+    """Return candidate paths for .nii.gz and .nii in preferred order."""
+    return [f"{base_path_without_ext}{ext}" for ext in NIFTI_EXTENSIONS]
+
 
 def upsample_to_128(image_data, original_shape):
     """
@@ -128,6 +135,12 @@ def process_all_participants():
     
     # Create output directory if it doesn't exist
     os.makedirs(OUTPUT_DATA_DIR, exist_ok=True)
+
+    if not os.path.isdir(PROCESS_DATA_DIR):
+        os.makedirs(PROCESS_DATA_DIR, exist_ok=True)
+        print(f"Warning: Input directory did not exist and was created: {PROCESS_DATA_DIR}")
+        print("No participant folders found yet. Run earlier preprocessing steps first.")
+        return
     
     # Centralized cropped ears directory from P3
     cropped_ears_dir = os.path.join(os.path.dirname(OUTPUT_DATA_DIR), "P3_Cropped_Ears")
@@ -156,14 +169,14 @@ def process_all_participants():
         
         # Look for left and right ear scans
         # Try per-patient dir first (long names), then centralized dir (short names)
-        left_ear_candidates = [
-            os.path.join(participant_path, f"{patient_id}_left_ear_cropped_mirrored_origin_reset.nii.gz"),
-            os.path.join(cropped_ears_dir, f"{patient_id}_left_ear.nii.gz"),
-        ]
-        right_ear_candidates = [
-            os.path.join(participant_path, f"{patient_id}_right_ear_cropped_origin_reset.nii.gz"),
-            os.path.join(cropped_ears_dir, f"{patient_id}_right_ear.nii.gz"),
-        ]
+        left_ear_candidates = (
+            with_all_nifti_extensions(os.path.join(participant_path, f"{patient_id}_left_ear_cropped_mirrored_origin_reset"))
+            + with_all_nifti_extensions(os.path.join(cropped_ears_dir, f"{patient_id}_left_ear"))
+        )
+        right_ear_candidates = (
+            with_all_nifti_extensions(os.path.join(participant_path, f"{patient_id}_right_ear_cropped_origin_reset"))
+            + with_all_nifti_extensions(os.path.join(cropped_ears_dir, f"{patient_id}_right_ear"))
+        )
         
         left_ear_path = next((p for p in left_ear_candidates if os.path.exists(p)), None)
         right_ear_path = next((p for p in right_ear_candidates if os.path.exists(p)), None)

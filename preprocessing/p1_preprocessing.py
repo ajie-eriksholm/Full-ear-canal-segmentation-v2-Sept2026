@@ -34,7 +34,7 @@ pre_quality_assessed = False  # Set to True to only process scans in acceptable_
 debug_mode = False  # Set to False to process all scans
 debug_scan_name = "sub01_pituitary__CT.nii.gz"  # Specific scan to process in debug mode
 
-voxel_threshold = (1.5, 1.5, 3.5)
+voxel_threshold = (1.5, 1.5, 5.5)
 intensity_clip_range = (-1000, 2007)
 new_spacing = [0.5, 0.5, 0.5]
 interpolator = sitk.sitkBSpline
@@ -46,10 +46,31 @@ labels_info = {
     17: "Left Auditory Canal"
 }
 
+NIFTI_EXTENSIONS = ('.nii.gz', '.nii')
+
+
+def strip_nifti_extension(filename):
+    """Strip .nii or .nii.gz extension from a filename."""
+    for ext in NIFTI_EXTENSIONS:
+        if filename.endswith(ext):
+            return filename[:-len(ext)]
+    return filename
+
+
+def extract_patient_id_from_raw_filename(filename):
+    """Extract patient id from raw scan filename like <patient>__CT(.nii|.nii.gz)."""
+    stem = strip_nifti_extension(filename)
+    return stem[:-len('__CT')] if stem.endswith('__CT') else stem
+
+
+def is_raw_ct_scan(filename):
+    """Return True for raw CT scans named <patient>__CT(.nii|.nii.gz)."""
+    return strip_nifti_extension(filename).endswith('__CT')
+
 # === Utility Functions ===
 def initialize_transform_json(scan_path, img, header, affine, voxel_size):
     """Initialize the transform JSON with original scan metadata."""
-    patient_id = os.path.basename(scan_path).replace('__CT.nii.gz', '')
+    patient_id = extract_patient_id_from_raw_filename(os.path.basename(scan_path))
     
     transform_data = {
         "patient_id": patient_id,
@@ -307,16 +328,27 @@ def process_single_scan(scan_path):
             "output_file": cropped_path
         })
         
+
         print("Resampling cropped volume...")
-        resampled_img = resample_volume(cropped_path, new_spacing, interpolator)
+        try:
+            resampled_img = resample_volume(cropped_path, new_spacing, interpolator)
+        except RuntimeError as e:
+            if "ITK only supports orthonormal direction cosines" in str(e):
+                print(f"[SKIP] SimpleITK orthonormal direction error for {patient_id}: {e}")
+                skip_path = os.path.join(patient_output_dir, f"{patient_id}_skip.txt")
+                with open(skip_path, 'w') as f:
+                    f.write("SimpleITK orthonormal direction error. Skipping this patient in future runs.\n")
+                return
+            else:
+                raise
         resampled_path = os.path.join(patient_output_dir, f"{patient_id}_CT_resampled.nii.gz")
         sitk.WriteImage(resampled_img, resampled_path)
-        
+
         # Record resampling in transform JSON
         resampled_size = resampled_img.GetSize()
         resampled_spacing = resampled_img.GetSpacing()
         resampled_origin = resampled_img.GetOrigin()
-        
+
         transform_data["transformations"].append({
             "step": 5,
             "operation": "resampling",
@@ -533,7 +565,7 @@ def process_single_scan(scan_path):
         print(f"Transform log saved to: {json_path}")
         
         print("Creating visualization...")
-        scan_name = os.path.basename(scan_path).replace('__CT.nii.gz', '.png')
+        scan_name = f"{extract_patient_id_from_raw_filename(os.path.basename(scan_path))}.png"
         img_path = os.path.join(output_img_dir, scan_name)
         visualize_comparison(sitk.ReadImage(cropped_path), resampled_img, voxel_size, new_spacing, img_path)
         print("Done.")
@@ -602,11 +634,11 @@ def main():
             print("Proceeding without quality filter.")
             acceptable_patient_ids = None
     
-    # Collect all scan paths ending with __CT.nii.gz
+    # Collect all scan paths ending with __CT.nii or __CT.nii.gz
     scan_paths = []
     for root, dirs, files in os.walk(Raw_scans_dir):
         for file in files:
-            if file.endswith('__CT.nii.gz'):
+            if is_raw_ct_scan(file):
                 scan_paths.append(os.path.join(root, file))
     
     # Filter scans if debug mode is enabled
@@ -625,7 +657,7 @@ def main():
     print(f"{'='*60}\n")
     
     for scan_path in scan_paths:
-        patient_id = os.path.basename(scan_path).replace('__CT.nii.gz', '')
+        patient_id = extract_patient_id_from_raw_filename(os.path.basename(scan_path))
         
         # Skip if patient not in acceptable list (when quality assessment is enabled)
         if acceptable_patient_ids is not None and patient_id not in acceptable_patient_ids:

@@ -1,5 +1,6 @@
 import os
 import sys
+import warnings
 import numpy as np
 import nibabel as nib
 import torch
@@ -37,26 +38,41 @@ debug_scan_name = "sub01_pituitary_CT_resampled_256.nii.gz"  # Specific scan to 
 no_eyes = False  # Set to True if scans don't include eyes (uses mandible top points instead of landmarks 12-13)
 skip_alignment = False  # Set to True to skip alignment step (useful for testing landmark detection only)
 
+
+CUDA_WARNING_PATTERNS = [
+    r".*cuda capability.*",
+    r".*Please install PyTorch with a following CUDA.*",
+    r".*is not compatible with the current PyTorch installation.*",
+]
+
+
+def suppress_incompatible_cuda_warnings():
+    """Suppress noisy warnings emitted for unsupported GPUs during CPU fallback."""
+    for pattern in CUDA_WARNING_PATTERNS:
+        warnings.filterwarnings("ignore", message=pattern, category=UserWarning)
+
 # Device configuration - check for GPU compatibility
 def get_device():
     """Determine the best available device, checking GPU compatibility."""
-    if torch.cuda.is_available():
-        try:
-            # Check GPU compute capability (PyTorch 2.x requires >= 7.0)
-            major, minor = torch.cuda.get_device_capability()
-            compute_capability = float(f"{major}.{minor}")
-            if compute_capability >= 7.0:
-                print(f"GPU detected and compatible - using CUDA (compute capability: {compute_capability})")
-                return torch.device('cuda')
-            else:
+    with warnings.catch_warnings():
+        suppress_incompatible_cuda_warnings()
+        if torch.cuda.is_available():
+            try:
+                # PyTorch 2.x requires compute capability >= 7.0 for this install.
+                major, minor = torch.cuda.get_device_capability()
+                compute_capability = float(f"{major}.{minor}")
+                if compute_capability >= 7.0:
+                    print(f"GPU detected and compatible - using CUDA (compute capability: {compute_capability})")
+                    return torch.device('cuda')
+
                 print(f"GPU compute capability {compute_capability} < 7.0 (required by PyTorch 2.x)")
                 print("Falling back to CPU")
                 return torch.device('cpu')
-        except Exception as e:
-            print(f"Error checking GPU compatibility: {e}")
-            print("Falling back to CPU")
-            return torch.device('cpu')
-    else:
+            except Exception as e:
+                print(f"Error checking GPU compatibility: {e}")
+                print("Falling back to CPU")
+                return torch.device('cpu')
+
         print("No GPU available - using CPU")
         return torch.device('cpu')
 
@@ -65,6 +81,28 @@ DEVICE = get_device()
 # Landmark configuration
 landmark_ids = [8, 9, 10, 11, 12, 13]
 num_landmarks = len(landmark_ids)
+
+NIFTI_EXTENSIONS = ('.nii.gz', '.nii')
+
+
+def strip_nifti_extension(filename):
+    """Strip .nii or .nii.gz extension from a filename."""
+    for ext in NIFTI_EXTENSIONS:
+        if filename.endswith(ext):
+            return filename[:-len(ext)]
+    return filename
+
+
+def extract_scan_name_from_resampled(filename):
+    """Extract scan name from <scan>_CT_resampled_256(.nii|.nii.gz)."""
+    stem = strip_nifti_extension(filename)
+    suffix = '_CT_resampled_256'
+    return stem[:-len(suffix)] if stem.endswith(suffix) else stem
+
+
+def is_resampled_scan(filename):
+    """Return True for <scan>_CT_resampled_256(.nii|.nii.gz)."""
+    return strip_nifti_extension(filename).endswith('_CT_resampled_256')
 
 
 # === Model Architecture ===
@@ -130,7 +168,7 @@ class UNet3D(torch.nn.Module):
 # === Helper Functions ===
 def initialize_transform_json(scan_path, dimensions, affine, step_number=1):
     """Initialize the transform JSON with original scan metadata for P2."""
-    scan_name = os.path.basename(scan_path).replace('_CT_resampled_256.nii.gz', '')
+    scan_name = extract_scan_name_from_resampled(os.path.basename(scan_path))
     
     transform_data = {
         "scan_name": scan_name,
@@ -210,10 +248,15 @@ def align_to_horizontal(scan_points, landmark_positions):
         left_right_xy /= lr_xy_norm
         target_lr = np.array([1, 0, 0])  # X-axis
         
-        # Check if already aligned
+        # Pick the closer X direction (+X or -X) to avoid a ~180° flip
         dot_product = np.dot(left_right_xy, target_lr)
+        if dot_product < 0:
+            target_lr = -target_lr          # accept -X as the LR axis
+            dot_product = -dot_product       # now angle is measured to -X
+            print("  LR vector closer to -X; targeting -X to avoid mirroring.")
+        
         angle_deg = np.degrees(np.arccos(np.clip(dot_product, -1.0, 1.0)))
-        print(f"  Angle to X-axis: {angle_deg:.2f}°")
+        print(f"  Angle to target X-axis: {angle_deg:.2f}°")
         
         if angle_deg < 1.0:  # Already aligned within 1 degree
             print("  Left-right vector already aligned to X-axis, skipping rotation.")
@@ -266,10 +309,23 @@ def segment_craniofacial_structures(input_path, output_dir, scan_name):
     
     # Determine device for segmentation
     seg_device = 'gpu' if DEVICE.type == 'cuda' else 'cpu'
-    
-    # Run totalsegmentator with craniofacial task
-    # Available structures: mandible, teeth_lower, skull, head, sinus_maxillary, sinus_frontal, teeth_upper
-    segmentation_img = totalsegmentator(input_path, task='craniofacial_structures', device=seg_device)
+
+    original_cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
+
+    try:
+        if seg_device == 'cpu':
+            # Hide unsupported GPUs from TotalSegmentator subprocesses to avoid repeated CUDA warnings.
+            os.environ['CUDA_VISIBLE_DEVICES'] = ''
+
+        with warnings.catch_warnings():
+            suppress_incompatible_cuda_warnings()
+            # Available structures: mandible, teeth_lower, skull, head, sinus_maxillary, sinus_frontal, teeth_upper
+            segmentation_img = totalsegmentator(input_path, task='craniofacial_structures', device=seg_device)
+    finally:
+        if original_cuda_visible_devices is None:
+            os.environ.pop('CUDA_VISIBLE_DEVICES', None)
+        else:
+            os.environ['CUDA_VISIBLE_DEVICES'] = original_cuda_visible_devices
     
     if segmentation_img is None:
         raise ValueError("Craniofacial segmentation failed or returned no output.")
@@ -492,9 +548,625 @@ def visualize_with_pyvista(scan_path, landmarks_world, landmarks_voxel, affine, 
         print(f"Saved {view_name} view to {output_path}")
 
 
+# ─── Head-muscles constants ────────────────────────────────────────────────────
+# Label IDs from TotalSegmentator head_muscles task (map_to_binary.py)
+HEAD_MUSCLES_LABEL_IDS = {
+    'masseter_right': 1,
+    'masseter_left': 2,
+    'lateral_pterygoid_right': 5,
+    'lateral_pterygoid_left': 6,
+}
+
+# Outlier detection (centroid-based): a point is flagged as an outlier if its
+# distance to the 6-point centroid exceeds (median_distance × ratio_threshold).
+# Muscle top points are expected to cluster more tightly around the centroid
+# than the eye-canal landmarks (lm10 / lm11), so we use a stricter ratio for
+# muscles and a looser ratio for lm10 / lm11.
+OUTLIER_CENTROID_RATIO_MUSCLE = 1.8     # stricter — muscles must stay close
+OUTLIER_CENTROID_RATIO_LANDMARK = 2.0   # tightened (was 3.0): catch grossly mislocalized lm10/lm11
+LANDMARK_LABELS_FOR_OUTLIER = ('lm10', 'lm11')
+
+# LM10 / LM11 anatomical distance range (corrected world coordinates, mm).
+# Used by check_lm10_lm11_symmetry to reject scans where one ear-canal
+# landmark is grossly mislocalized. Uses ONLY the 3D Euclidean distance
+# between the two points, which is invariant to head tilt/rotation in the
+# scanner — so a tilted-but-correct head still passes.
+# Adult ear-canal-to-ear-canal distance is typically 120-150 mm; we widen
+# this range to be safe against pediatric/anatomical variation.
+LM10_LM11_MIN_DIST_MM = 80.0
+LM10_LM11_MAX_DIST_MM = 200.0
+
+
+def fit_plane_svd(points):
+    """
+    Fit a plane through N points (N >= 3) using SVD (least squares).
+
+    Returns:
+        normal   – unit normal vector of the best-fit plane
+        centroid – centroid of the input points (lies on the plane)
+    """
+    centroid = points.mean(axis=0)
+    centered = points - centroid
+    _, _, Vt = np.linalg.svd(centered)
+    normal = Vt[-1]          # right singular vector with smallest singular value
+    normal /= np.linalg.norm(normal)
+    return normal, centroid
+
+
+def check_lm10_lm11_symmetry(lm10, lm11,
+                              min_dist=LM10_LM11_MIN_DIST_MM,
+                              max_dist=LM10_LM11_MAX_DIST_MM):
+    """
+    Validate that the 3D Euclidean distance between LM10 and LM11 is within
+    an anatomically plausible range.
+
+    Distance is rotation-invariant, so a tilted-but-correctly-localized head
+    still passes — we explicitly do NOT check Y/Z component agreement,
+    because head misalignment in the scanner is exactly what FH alignment is
+    designed to correct.
+
+    Args:
+        lm10, lm11 – (3,) arrays in corrected world coordinates (mm)
+
+    Returns:
+        bad_reasons – list of human-readable failure strings (empty if OK)
+        info        – dict with the measured distance for logging
+    """
+    dist = float(np.linalg.norm(lm10 - lm11))
+    info = {
+        'distance_mm': dist,
+        'min_dist_mm': min_dist,
+        'max_dist_mm': max_dist,
+    }
+
+    bad = []
+    if dist < min_dist:
+        bad.append(f"|LM10 - LM11| = {dist:.1f} mm < {min_dist:.1f} mm (too close)")
+    elif dist > max_dist:
+        bad.append(f"|LM10 - LM11| = {dist:.1f} mm > {max_dist:.1f} mm (too far)")
+
+    if bad:
+        for reason in bad:
+            print(f"  WARNING: LM10/LM11 distance — {reason}")
+    else:
+        print(f"  OK: LM10/LM11 distance = {dist:.1f} mm")
+
+    return bad, info
+
+
+def detect_and_remove_outliers(points, point_labels, landmark_labels=LANDMARK_LABELS_FOR_OUTLIER,
+                                max_rounds=2):
+    """
+    Centroid-based outlier detection.
+
+    Compute the centroid of all input points, then measure each point's distance
+    to that centroid. A point is flagged as an outlier if its distance exceeds
+    (median_distance × ratio), where the ratio depends on the point type:
+        - lm10 / lm11 (eye-canal landmarks): looser threshold
+          (OUTLIER_CENTROID_RATIO_LANDMARK)
+        - all other points (muscle top points): stricter threshold
+          (OUTLIER_CENTROID_RATIO_MUSCLE)
+
+    Runs up to *max_rounds* rounds. In each round the single worst offender
+    (largest distance/median ratio relative to its own threshold) is removed,
+    and the centroid is recomputed for the next round.
+
+    Args:
+        points           – (N, 3) numpy array  (N >= 4)
+        point_labels     – list of N string labels
+        landmark_labels  – set/tuple of labels that use the looser threshold
+                           (and that the caller treats as fatal if removed)
+        max_rounds       – maximum number of outlier-removal rounds
+
+    Returns:
+        filtered_points   – array after removal
+        filtered_labels   – labels after removal
+        removed_labels    – list of labels removed (in order)
+        all_round_info    – list of dicts, one per round, with keys
+                            'distances' (dict label→float),
+                            'centroid' (list of 3 floats),
+                            'median_distance' (float),
+                            'removed' (label or None)
+    """
+    current_points = points.copy()
+    current_labels = list(point_labels)
+    removed_labels = []
+    all_round_info = []
+
+    landmark_label_set = set(landmark_labels)
+
+    for _round in range(max_rounds):
+        n = len(current_points)
+        if n < 4:
+            break  # need at least 4 points to be meaningful
+
+        centroid = current_points.mean(axis=0)
+        distances = np.linalg.norm(current_points - centroid, axis=1)
+        median_distance = float(np.median(distances))
+
+        round_info = {
+            'distances': {lbl: float(d) for lbl, d in zip(current_labels, distances)},
+            'centroid': [float(c) for c in centroid],
+            'median_distance': median_distance,
+            'removed': None,
+        }
+
+        if median_distance < 1e-6:
+            all_round_info.append(round_info)
+            break
+
+        # Per-point excess ratio = distance / (median * threshold_for_this_point).
+        # Values > 1 indicate the point exceeds its own allowed multiple.
+        excess = np.zeros(n)
+        for i, lbl in enumerate(current_labels):
+            ratio = (OUTLIER_CENTROID_RATIO_LANDMARK
+                     if lbl in landmark_label_set
+                     else OUTLIER_CENTROID_RATIO_MUSCLE)
+            excess[i] = distances[i] / (median_distance * ratio)
+
+        if excess.max() <= 1.0:
+            all_round_info.append(round_info)
+            break  # no outlier detected — done
+
+        outlier_idx = int(np.argmax(excess))
+        outlier_label = current_labels[outlier_idx]
+        outlier_ratio_used = (OUTLIER_CENTROID_RATIO_LANDMARK
+                              if outlier_label in landmark_label_set
+                              else OUTLIER_CENTROID_RATIO_MUSCLE)
+        round_info['removed'] = outlier_label
+        all_round_info.append(round_info)
+
+        removed_labels.append(outlier_label)
+
+        keep_mask = np.ones(n, dtype=bool)
+        keep_mask[outlier_idx] = False
+        current_points = current_points[keep_mask]
+        current_labels = [lbl for i, lbl in enumerate(current_labels) if i != outlier_idx]
+
+        print(f"    Round {_round + 1}: removed '{outlier_label}' "
+              f"(distance {distances[outlier_idx]:.2f} mm, "
+              f"{distances[outlier_idx] / median_distance:.2f}x median, "
+              f"threshold {outlier_ratio_used:.1f}x)")
+
+        # If the removed label is a landmark, no need to continue
+        if outlier_label in landmark_label_set:
+            break
+
+    return current_points, current_labels, removed_labels, all_round_info
+
+
+def check_muscle_horizontal_containment(lm10, lm11, muscle_points, muscle_labels):
+    """
+    Verify that all muscle top points lie within the horizontal (X-axis) span
+    defined by LM10 and LM11. Anatomically the masseter / lateral pterygoid
+    bellies should sit between the two ear-canal landmarks along the
+    left-right axis. A muscle whose X-coordinate falls outside the
+    [min(lm10.x, lm11.x), max(lm10.x, lm11.x)] range (plus a tolerance) is
+    flagged.
+
+    Args:
+        lm10, lm11      – (3,) arrays in corrected world coordinates
+        muscle_points   – (M, 3) array of muscle top-point coordinates
+        muscle_labels   – list of M string labels (for logging)
+
+    Returns:
+        bad_muscles – list of muscle label strings that fail the containment
+                      check (may be empty)
+        info        – dict with debug details
+    """
+    x_lo = float(min(lm10[0], lm11[0]))
+    x_hi = float(max(lm10[0], lm11[0]))
+    x_range = x_hi - x_lo
+    # Allow 20 pct of the LM10/LM11 X-range as tolerance
+    tolerance = 0.20 * x_range if x_range > 1e-3 else 5.0
+
+    bad = []
+    info = {
+        'lm10_x': float(lm10[0]),
+        'lm11_x': float(lm11[0]),
+        'landmark_x_min': x_lo,
+        'landmark_x_max': x_hi,
+        'tolerance': float(tolerance),
+        'muscles': {},
+    }
+
+    for label, pt in zip(muscle_labels, muscle_points):
+        x = float(pt[0])
+        outside = x < (x_lo - tolerance) or x > (x_hi + tolerance)
+        info['muscles'][label] = {'x': x, 'outside': outside}
+        if outside:
+            bad.append(label)
+            print(f"  WARNING: {label} X={x:.2f} is OUTSIDE landmark X-range "
+                  f"[{x_lo:.2f}, {x_hi:.2f}] +/- {tolerance:.2f}")
+        else:
+            print(f"  OK: {label} X={x:.2f} within landmark X-range "
+                  f"[{x_lo:.2f}, {x_hi:.2f}] +/- {tolerance:.2f}")
+
+    return bad, info
+
+
+def render_frankfort_landmarks_visualization(scan_data, points_6pt, point_labels,
+                                             output_path,
+                                             removed_labels=None,
+                                             flagged_labels=None,
+                                             status_text=None,
+                                             threshold=-300):
+    """
+    Render the 6-point Frankfort-plane landmark visualization (3 views).
+
+    Always produces an output image, regardless of whether the scan ultimately
+    passes or fails the outlier / containment / lateral-extent checks.
+
+    Args:
+        scan_data        – 3D numpy array of the (resampled) scan
+        points_6pt       – (6, 3) array of candidate plane points in corrected
+                           world coordinates
+        point_labels     – list of 6 string labels matching points_6pt order
+        output_path      – PNG path to save
+        removed_labels   – iterable of labels removed by outlier detection
+                           (rendered in gray and tagged "OUTLIER")
+        flagged_labels   – iterable of labels that triggered a check failure
+                           (rendered in gray and tagged "FLAGGED")
+        status_text      – optional banner string drawn at the top of the image
+        threshold        – HU threshold for the gray scan point cloud
+    """
+    removed_set = set(removed_labels or [])
+    flagged_set = set(flagged_labels or [])
+
+    # Map of internal label -> (display name, color). Any label not in this
+    # map (shouldn't happen) falls back to the raw label / 'gray'.
+    LABEL_DISPLAY = {
+        'lm10':                    ('LM10',          'yellow'),
+        'lm11':                    ('LM11',          'orange'),
+        'masseter_right':          ('Masseter R',    'cyan'),
+        'masseter_left':           ('Masseter L',    'magenta'),
+        'lateral_pterygoid_right': ('Lat.Pteryg. R', 'lime'),
+        'lateral_pterygoid_left':  ('Lat.Pteryg. L', 'red'),
+    }
+
+    vis_views = [
+        ('Axial (Top-Down)', 'xy', 0),
+        ('Sagittal (Side)', 'yz', 90),
+        ('Coronal (Front)', 'xz', 0),
+    ]
+
+    plotter = pv.Plotter(shape=(1, 3), off_screen=True, window_size=[2880, 1080])
+    mask_points_vis = np.argwhere(scan_data > threshold).astype(np.float32)
+
+    for idx, (title, view, azimuth) in enumerate(vis_views):
+        plotter.subplot(0, idx)
+
+        if mask_points_vis.size:
+            grid_vis = pv.PolyData(mask_points_vis)
+            plotter.add_mesh(grid_vis, color='lightgray', opacity=0.2, point_size=2)
+
+        for i, landmark in enumerate(points_6pt):
+            lbl = point_labels[i]
+            name, color = LABEL_DISPLAY.get(lbl, (lbl, 'gray'))
+            is_outlier = lbl in removed_set
+            is_flagged = lbl in flagged_set
+            display_color = 'gray' if (is_outlier or is_flagged) else color
+
+            sphere = pv.Sphere(radius=4, center=landmark)
+            plotter.add_mesh(sphere, color=display_color,
+                             label=name if idx == 2 else None)
+
+            tag = ''
+            if is_outlier and is_flagged:
+                tag = ' (OUTLIER+FLAGGED)'
+            elif is_outlier:
+                tag = ' (OUTLIER)'
+            elif is_flagged:
+                tag = ' (FLAGGED)'
+            label_text = f"{name}{tag}"
+            plotter.add_point_labels(
+                [landmark], [label_text],
+                font_size=16, text_color=display_color,
+                point_size=1, shape_opacity=0, bold=True,
+            )
+
+        if idx == 2:
+            plotter.add_legend(bcolor='white', face='rectangle', size=(0.25, 0.35))
+
+        plotter.camera_position = view
+        if azimuth != 0:
+            plotter.camera.azimuth = azimuth
+        plotter.camera.zoom(1.3)
+        plotter.add_text(title, position='upper_edge', font_size=14, color='black')
+
+        if status_text and idx == 0:
+            plotter.add_text(status_text, position='lower_edge',
+                             font_size=12, color='red')
+
+    plotter.screenshot(output_path)
+    plotter.close()
+
+
+def check_landmarks_further_than_muscles(points, labels,
+                                         landmark_labels=LANDMARK_LABELS_FOR_OUTLIER):
+    """
+    Require that the kept lm10 / lm11 landmarks lie further from the centroid
+    of the point set than every kept muscle point. Anatomically the ear-canal
+    landmarks should be the most lateral points among the 6 reference points;
+    if a muscle ends up further from the centroid than lm10 or lm11, that
+    landmark is suspect.
+
+    Args:
+        points         – (N, 3) array of points kept after outlier removal
+        labels         – list of N string labels
+        landmark_labels – set/tuple of labels to validate
+
+    Returns:
+        bad_landmarks – list of landmark labels that are closer to the
+                        centroid than the furthest kept muscle point
+        info          – dict with distances and the muscle reference distance
+    """
+    if len(points) < 2:
+        return [], {'note': 'too few points to evaluate'}
+
+    centroid = points.mean(axis=0)
+    distances = np.linalg.norm(points - centroid, axis=1)
+
+    landmark_label_set = set(landmark_labels)
+    muscle_distances = [d for lbl, d in zip(labels, distances)
+                        if lbl not in landmark_label_set]
+
+    info = {
+        'centroid': [float(c) for c in centroid],
+        'distances': {lbl: float(d) for lbl, d in zip(labels, distances)},
+    }
+
+    if not muscle_distances:
+        info['note'] = 'no muscle points present after filtering'
+        return [], info
+
+    max_muscle_distance = float(max(muscle_distances))
+    info['max_muscle_distance'] = max_muscle_distance
+
+    bad = []
+    for lbl, d in zip(labels, distances):
+        if lbl not in landmark_label_set:
+            continue
+        if d <= max_muscle_distance:
+            bad.append(lbl)
+            print(f"  WARNING: {lbl} centroid distance {d:.2f} mm is NOT greater "
+                  f"than max muscle distance {max_muscle_distance:.2f} mm")
+        else:
+            print(f"  OK: {lbl} centroid distance {d:.2f} mm > max muscle "
+                  f"distance {max_muscle_distance:.2f} mm")
+
+    return bad, info
+
+
+def segment_head_muscles(input_path, output_dir, scan_name):
+    """
+    Segment head muscles using TotalSegmentator head_muscles task.
+
+    Relevant labels: masseter_right (1), masseter_left (2),
+                     lateral_pterygoid_right (5), lateral_pterygoid_left (6).
+
+    Reference: Wasserthal et al. (2023) TotalSegmentator: Robust Segmentation
+               of 104 Anatomic Structures in CT Images.
+               Radiology: Artificial Intelligence.
+               https://doi.org/10.1148/ryai.230024
+
+    Returns:
+        Tuple of (segmentation NIfTI image, output path string)
+    """
+    print(f"  Running TotalSegmentator for head muscles (masseter + lateral pterygoid)...")
+
+    seg_device = 'gpu' if DEVICE.type == 'cuda' else 'cpu'
+    original_cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
+
+    try:
+        if seg_device == 'cpu':
+            os.environ['CUDA_VISIBLE_DEVICES'] = ''
+
+        with warnings.catch_warnings():
+            suppress_incompatible_cuda_warnings()
+            segmentation_img = totalsegmentator(input_path, task='head_muscles', device=seg_device)
+    finally:
+        if original_cuda_visible_devices is None:
+            os.environ.pop('CUDA_VISIBLE_DEVICES', None)
+        else:
+            os.environ['CUDA_VISIBLE_DEVICES'] = original_cuda_visible_devices
+
+    if segmentation_img is None:
+        raise ValueError("Head muscles segmentation failed or returned no output.")
+
+    seg_output_path = os.path.join(output_dir, f"{scan_name}_head_muscles_segmented.nii.gz")
+    nib.save(segmentation_img, seg_output_path)
+    print(f"  Head muscles segmentation saved to {seg_output_path}")
+
+    return segmentation_img, seg_output_path
+
+
+def extract_muscle_top_points(segmentation_data, affine, scan_name):
+    """
+    Extract the topmost (superior) voxel of each of the four target muscles:
+        masseter_right, masseter_left,
+        lateral_pterygoid_right, lateral_pterygoid_left.
+
+    Missing muscles are tolerated: if TotalSegmentator does not produce a
+    label for one or more muscles on a given scan, that muscle is returned
+    as ``None``. The caller is responsible for verifying that enough points
+    remain to fit the Frankfort plane and to define a left/right axis.
+
+    Applies the same coordinate correction used elsewhere:
+        nibabel world (x, y, z) → corrected (z, -y, -x).
+
+    Returns:
+        Tuple of (masseter_right_top, masseter_left_top,
+                  lateral_pterygoid_right_top, lateral_pterygoid_left_top)
+        where each entry is either a (3,) corrected world-coordinate array
+        in mm or ``None`` if the muscle was missing/empty.
+    """
+    unique_labels = np.unique(segmentation_data)
+    print(f"  Unique head_muscles segmentation labels: {unique_labels}")
+
+    target_muscles = {
+        'masseter_right':          HEAD_MUSCLES_LABEL_IDS['masseter_right'],
+        'masseter_left':           HEAD_MUSCLES_LABEL_IDS['masseter_left'],
+        'lateral_pterygoid_right': HEAD_MUSCLES_LABEL_IDS['lateral_pterygoid_right'],
+        'lateral_pterygoid_left':  HEAD_MUSCLES_LABEL_IDS['lateral_pterygoid_left'],
+    }
+
+    muscle_top_points = {}
+
+    for muscle_name, label_id in target_muscles.items():
+        if label_id not in unique_labels:
+            print(f"  WARNING: label {label_id} ({muscle_name}) not present "
+                  f"in head_muscles segmentation — skipping this muscle.")
+            muscle_top_points[muscle_name] = None
+            continue
+
+        mask = (segmentation_data == label_id)
+        voxel_coords = np.argwhere(mask)   # (N, 3): (i, j, k) nibabel index order
+
+        if voxel_coords.size == 0:
+            print(f"  WARNING: {muscle_name} (label {label_id}) has 0 voxels — skipping.")
+            muscle_top_points[muscle_name] = None
+            continue
+
+        print(f"  {muscle_name}: {len(voxel_coords)} voxels found")
+
+        # Convert (i, j, k) → world coordinates via affine
+        # nibabel affine expects column order (x=k, y=j, z=i)
+        voxel_homogeneous = np.hstack([
+            voxel_coords[:, [2, 1, 0]],          # reorder (i,j,k) → (k,j,i)=(x,y,z)
+            np.ones((len(voxel_coords), 1))
+        ])
+        world_coords = (affine @ voxel_homogeneous.T).T[:, :3]
+
+        # Coordinate correction: (x, y, z) → (z, -y, -x)
+        world_corrected = np.column_stack([
+            world_coords[:, 2],    # z  → new x
+            -world_coords[:, 1],   # -y → new y
+            -world_coords[:, 0],   # -x → new z
+        ])
+
+        # Top point = maximum corrected-Z (superior direction)
+        top_idx = np.argmax(world_corrected[:, 2])
+        top_point = world_corrected[top_idx]
+        muscle_top_points[muscle_name] = top_point
+
+        print(f"    Top point: ({top_point[0]:.2f}, {top_point[1]:.2f}, {top_point[2]:.2f})")
+
+    return (
+        muscle_top_points['masseter_right'],
+        muscle_top_points['masseter_left'],
+        muscle_top_points['lateral_pterygoid_right'],
+        muscle_top_points['lateral_pterygoid_left'],
+    )
+
+
+def align_to_horizontal_multipoint(scan_points, plane_points, right_points, left_points):
+    """
+    Align scan points so that the Frankfort plane becomes horizontal,
+    using SVD-based plane fitting for robustness with N >= 3 reference points.
+
+    Steps:
+    1. Fit plane normal via SVD over all plane_points.
+    2. Rotate so the plane normal aligns with the negative Z-axis (horizontal).
+    3. Correct left-right orientation using centroids of right_points vs left_points.
+
+    Args:
+        scan_points   – (N, 3) array of scan mask points to transform
+        plane_points  – (M, 3) reference points for plane fitting (M >= 3)
+        right_points  – (K, 3) anatomical right-side reference points (K >= 1)
+        left_points   – (K, 3) anatomical left-side reference points (K >= 1)
+
+    Returns:
+        Same 5-tuple as align_to_horizontal:
+        (aligned_scan, final_rotation, orig_normal, center, z_rotation_degrees)
+    """
+    orig_normal, center = fit_plane_svd(plane_points)
+    target_normal = np.array([0, 0, -1])
+
+    # SVD normal sign is arbitrary – orient it towards the target so that
+    # R.align_vectors computes a small corrective rotation instead of a
+    # ~180° flip that would mirror the volume.
+    if np.dot(orig_normal, target_normal) < 0:
+        orig_normal = -orig_normal
+
+    scan_points_centered = scan_points - center
+
+    # First rotation: make Frankfort plane horizontal
+    rot_to_horizontal, _ = R.align_vectors([target_normal], [orig_normal])
+
+    # Rotate right/left reference points with the first rotation
+    right_rotated = rot_to_horizontal.apply(right_points - center)
+    left_rotated  = rot_to_horizontal.apply(left_points  - center)
+
+    right_centroid = right_rotated.mean(axis=0)
+    left_centroid  = left_rotated.mean(axis=0)
+
+    print(f"  Right muscle centroid (after horizontal rotation): {right_centroid}")
+    print(f"  Left muscle centroid  (after horizontal rotation): {left_centroid}")
+
+    # Compute LR direction: from left centroid to right centroid
+    left_right_vector = right_centroid - left_centroid
+    lr_distance = np.linalg.norm(left_right_vector)
+    left_right_vector /= lr_distance
+
+    # Project onto XY plane to ensure it is truly horizontal
+    left_right_xy = left_right_vector.copy()
+    left_right_xy[2] = 0
+    lr_xy_norm = np.linalg.norm(left_right_xy)
+
+    print(f"  Left-Right vector: {left_right_vector}")
+    print(f"  L-R distance: {lr_distance:.2f}")
+    print(f"  Z-component: {left_right_vector[2]:.4f}")
+    print(f"  XY projection norm: {lr_xy_norm:.4f}")
+
+    if lr_xy_norm < 0.1:
+        print("  WARNING: Left-right vector is nearly vertical! Skipping L-R alignment.")
+        final_rotation = rot_to_horizontal
+        z_rotation_degrees = 0.0
+    else:
+        left_right_xy /= lr_xy_norm
+        target_lr = np.array([1, 0, 0])
+
+        # Pick the closer X direction (+X or -X) to avoid a ~180° flip
+        dot_product = np.dot(left_right_xy, target_lr)
+        if dot_product < 0:
+            target_lr = -target_lr
+            dot_product = -dot_product
+            print("  LR vector closer to -X; targeting -X to avoid mirroring.")
+
+        angle_deg = np.degrees(np.arccos(np.clip(dot_product, -1.0, 1.0)))
+        print(f"  Angle to target X-axis: {angle_deg:.2f}°")
+
+        if angle_deg < 1.0:
+            print("  Left-right vector already aligned to X-axis, skipping rotation.")
+            final_rotation = rot_to_horizontal
+            z_rotation_degrees = 0.0
+        else:
+            cross = np.cross(left_right_xy, target_lr)
+            if cross[2] > 0:
+                angle_rad = np.arccos(dot_product)
+            else:
+                angle_rad = -np.arccos(dot_product)
+
+            rot_z = R.from_euler('z', angle_rad)
+            print(f"  Applying Z-rotation: {np.degrees(angle_rad):.2f}°")
+
+            final_rotation = rot_z * rot_to_horizontal
+            z_rotation_degrees = np.degrees(angle_rad)
+
+    aligned_scan = final_rotation.apply(scan_points_centered) + center
+
+    return aligned_scan, final_rotation, orig_normal, center, abs(z_rotation_degrees)
+
+
 # === Main Processing Pipeline ===
 class _AlignmentSkipped(Exception):
     """Raised intentionally when skip_alignment=True to exit the alignment try-block cleanly."""
+    pass
+
+
+class _LandmarkOutlierError(Exception):
+    """Raised when lm10 or lm11 is detected as a plane outlier, indicating a landmark error."""
     pass
 
 
@@ -524,7 +1196,7 @@ def process_scans():
     nii_files = []
     for root, dirs, files in os.walk(Processed_scans_dir):
         for file in files:
-            if file.endswith('_CT_resampled_256.nii.gz'):
+            if is_resampled_scan(file):
                 nii_files.append(os.path.join(root, file))
     
     nii_files = sorted(nii_files)
@@ -542,7 +1214,7 @@ def process_scans():
     print(f"\nFound {len(nii_files)} scans to process")
     
     if len(nii_files) == 0:
-        print("No scans found matching pattern '*_CT_resampled_256.nii.gz'")
+        print("No scans found matching pattern '*_CT_resampled_256.nii[.gz]'")
         return
     
     # Store all predictions for CSV export
@@ -558,7 +1230,7 @@ def process_scans():
     for nii_path in tqdm(nii_files, desc="Processing scans"):
         # Extract scan/patient name
         filename = os.path.basename(nii_path)
-        scan_name = filename.replace('_CT_resampled_256.nii.gz', '')
+        scan_name = extract_scan_name_from_resampled(filename)
         
         print(f"\n{'='*60}")
         print(f"Processing: {scan_name}")
@@ -714,129 +1386,280 @@ def process_scans():
             all_landmarks = np.array([landmark_locations_world[lm_id] for lm_id in landmark_ids])
             
             # Choose plane fitting method based on no_eyes configuration
+            right_muscle_points = None   # set only in no_eyes mode (for LR alignment)
+            left_muscle_points  = None
             if no_eyes:
-                print(f"  No-eyes mode: Using landmarks 10-11 + mandible top points for plane")
-                
-                # Segment craniofacial structures to get mandible
-                segmentation_img, seg_path = segment_craniofacial_structures(
+                print(f"  No-eyes mode: Using lm10, lm11 + masseter/lateral-pterygoid top points (6 pts)")
+
+                # Segment head muscles
+                segmentation_img, seg_path = segment_head_muscles(
                     nii_path, scan_landmarks_dir, scan_name
                 )
                 segmentation_data = segmentation_img.get_fdata()
-                
-                # Extract top points of mandible (left and right)
-                left_mandible_top, right_mandible_top = extract_mandible_top_points(
-                    segmentation_data, affine, scan_name
-                )
-                
-                # Create landmarks for plane: lm10, lm11, left_mandible_top, right_mandible_top
-                landmarks_for_plane = np.array([
-                    landmark_locations_world[10],  # lm10
-                    landmark_locations_world[11],  # lm11
-                    left_mandible_top,              # replaces lm12
-                    right_mandible_top              # replaces lm13
-                ])
-                
-                print(f"  Plane landmarks:")
-                print(f"    LM10: {landmarks_for_plane[0]}")
-                print(f"    LM11: {landmarks_for_plane[1]}")
-                print(f"    Left mandible top (pseudo-LM12): {landmarks_for_plane[2]}")
-                print(f"    Right mandible top (pseudo-LM13): {landmarks_for_plane[3]}")
-                
-                # Create visualization of Frankfort plane landmarks
-                print(f"  Creating Frankfort plane landmarks visualization...")
-                fh_plane_vis_path = os.path.join(scan_viz_dir, f"{scan_name}_frankfort_plane_landmarks.png")
-                
-                # Create custom visualization for these 4 points
-                # Use different colors for landmark types
-                plotter = pv.Plotter(shape=(1, 3), off_screen=True, window_size=[2880, 1080])
-                
-                # Create mask points from scan
-                mask_points = np.argwhere(img_tensor.cpu().numpy()[0, 0] > -300).astype(np.float32)
-                
-                landmark_names_fh = ['LM10', 'LM11', 'L-Mandible (LM12)', 'R-Mandible (LM13)']
-                colors_fh = ['yellow', 'orange', 'cyan', 'magenta']
-                
-                views = [
-                    ('Axial (Top-Down)', 'xy', 0),
-                    ('Sagittal (Side)', 'yz', 90),
-                    ('Coronal (Front)', 'xz', 0)
+
+                # Extract topmost voxel for each of the four target muscles
+                # (any muscle missing from the segmentation is returned as None)
+                masseter_right_top, masseter_left_top, lat_pteryg_right_top, lat_pteryg_left_top = \
+                    extract_muscle_top_points(segmentation_data, affine, scan_name)
+
+                # Build the candidate point set, skipping any muscles that
+                # TotalSegmentator failed to produce. LM10/LM11 are always
+                # included; we require at least one muscle on each side so
+                # the LR-direction step still has a meaningful left vs. right
+                # reference.
+                _muscle_candidates = [
+                    ('masseter_right',          masseter_right_top),
+                    ('masseter_left',           masseter_left_top),
+                    ('lateral_pterygoid_right', lat_pteryg_right_top),
+                    ('lateral_pterygoid_left',  lat_pteryg_left_top),
                 ]
-                
-                for idx, (title, view, azimuth) in enumerate(views):
-                    plotter.subplot(0, idx)
-                    
-                    # Add scan points as point cloud
-                    grid = pv.PolyData(mask_points)
-                    plotter.add_mesh(grid, color='lightgray', opacity=0.2, point_size=2)
-                    
-                    # Add each Frankfort plane landmark
-                    for i, (landmark, name, color) in enumerate(zip(landmarks_for_plane, landmark_names_fh, colors_fh)):
-                        sphere = pv.Sphere(radius=4, center=landmark)
-                        plotter.add_mesh(sphere, color=color, label=name if idx == 2 else None)
-                        
-                        # Add text label
-                        plotter.add_point_labels(
-                            [landmark], 
-                            [name], 
-                            font_size=18, 
-                            text_color=color,
-                            point_size=1,
-                            shape_opacity=0,
-                            bold=True
+                _missing_muscles = [name for name, pt in _muscle_candidates if pt is None]
+                _present_muscles = [(name, pt) for name, pt in _muscle_candidates if pt is not None]
+
+                _right_present = any(name.endswith('_right') for name, _ in _present_muscles)
+                _left_present  = any(name.endswith('_left')  for name, _ in _present_muscles)
+
+                if _missing_muscles:
+                    print(f"  Missing muscle segmentations: {_missing_muscles}")
+                if len(_present_muscles) < 2:
+                    raise _LandmarkOutlierError(
+                        f"Only {len(_present_muscles)} muscle(s) segmented "
+                        f"({[n for n, _ in _present_muscles]}); need at least 2 "
+                        f"to fit a Frankfort plane with LM10/LM11. Scan: '{scan_name}'."
+                    )
+                if not (_right_present and _left_present):
+                    raise _LandmarkOutlierError(
+                        f"Muscle segmentation missing on one side "
+                        f"(right={_right_present}, left={_left_present}); cannot "
+                        f"determine left-right axis. Scan: '{scan_name}'."
+                    )
+
+                point_labels_6pt = ['lm10', 'lm11'] + [name for name, _ in _present_muscles]
+                points_6pt = np.array(
+                    [landmark_locations_world[10], landmark_locations_world[11]]
+                    + [pt for _, pt in _present_muscles]
+                )
+
+                print(f"\n  {len(points_6pt)}-point FH plane candidates:")
+                for _lbl, _pt in zip(point_labels_6pt, points_6pt):
+                    print(f"    {_lbl}: ({_pt[0]:.2f}, {_pt[1]:.2f}, {_pt[2]:.2f})")
+
+                fh_plane_vis_path = os.path.join(scan_viz_dir, f"{scan_name}_frankfort_plane_landmarks.png")
+                scan_volume = img_tensor.cpu().numpy()[0, 0]
+
+                # Collect failures across all checks; we render the visualization
+                # before raising, so the user always gets an image for review.
+                failure_reasons = []        # list of human-readable strings
+                flagged_labels = set()      # labels to highlight in the image
+                removed_labels = []
+                all_round_info = []
+                filtered_points = points_6pt
+                filtered_labels = list(point_labels_6pt)
+                lateral_info = {}
+                symmetry_info = {}
+
+                # --- Check 0: LM10 / LM11 anatomical distance ---
+                # Catches grossly mislocalized ear-canal landmarks via the
+                # rotation-invariant 3D distance between them. Tilted heads
+                # still pass; only anatomically impossible spacings fail.
+                print(f"\n  LM10/LM11 distance check:")
+                bad_symmetry, symmetry_info = check_lm10_lm11_symmetry(
+                    landmark_locations_world[10], landmark_locations_world[11],
+                )
+                if bad_symmetry:
+                    # Cannot determine which of LM10/LM11 is wrong from the
+                    # distance test alone, so flag both for the visualization.
+                    flagged_labels.update(['lm10', 'lm11'])
+                    failure_reasons.append(
+                        f"LM10/LM11 distance check failed: {'; '.join(bad_symmetry)}."
+                    )
+
+                # --- Check 1: Horizontal containment of muscles within LM10/LM11 ---
+                # Only check muscles that were actually segmented.
+                muscle_lbls_array = [name for name, _ in _present_muscles]
+                muscle_pts_array  = np.array([pt for _, pt in _present_muscles])
+                print(f"\n  Horizontal containment check (X-axis): muscles inside LM10/LM11 span")
+                bad_muscles_containment, containment_info = check_muscle_horizontal_containment(
+                    landmark_locations_world[10], landmark_locations_world[11],
+                    muscle_pts_array, muscle_lbls_array,
+                )
+                if bad_muscles_containment:
+                    flagged_labels.update(bad_muscles_containment)
+                    failure_reasons.append(
+                        f"Muscle(s) {bad_muscles_containment} failed horizontal containment "
+                        f"(X outside LM10/LM11 span)."
+                    )
+
+                # --- Check 2: Centroid-based outlier detection (up to 2 rounds) ---
+                if not failure_reasons:
+                    print(f"\n  Centroid-based outlier detection:")
+                    filtered_points, filtered_labels, removed_labels, all_round_info = \
+                        detect_and_remove_outliers(points_6pt, point_labels_6pt)
+
+                    if all_round_info:
+                        first_round = all_round_info[0]
+                        first_distances = first_round['distances']
+                        print(f"\n  Centroid distances - round 1 "
+                              f"(median = {first_round['median_distance']:.2f} mm):")
+                        for _lbl in point_labels_6pt:
+                            if _lbl in first_distances:
+                                print(f"    {_lbl}: {first_distances[_lbl]:.2f} mm")
+
+                    removed_landmarks = [lbl for lbl in removed_labels if lbl in ('lm10', 'lm11')]
+                    if removed_landmarks:
+                        flagged_labels.update(removed_landmarks)
+                        detail_parts = []
+                        for ri, rinfo in enumerate(all_round_info):
+                            if rinfo['removed']:
+                                d_val = rinfo['distances'].get(rinfo['removed'], 0.0)
+                                detail_parts.append(
+                                    f"round {ri+1}: removed '{rinfo['removed']}' "
+                                    f"(distance {d_val:.2f} mm, median {rinfo['median_distance']:.2f} mm)"
+                                )
+                        failure_reasons.append(
+                            f"Landmark(s) {removed_landmarks} detected as centroid outlier(s). "
+                            f"{'; '.join(detail_parts)}."
                         )
-                    
-                    # Add legend only to last subplot
-                    if idx == 2:
-                        plotter.add_legend(bcolor='white', face='rectangle', size=(0.25, 0.25))
-                    
-                    # Set camera position
-                    plotter.camera_position = view
-                    if azimuth != 0:
-                        plotter.camera.azimuth = azimuth
-                    plotter.camera.zoom(1.3)
-                    
-                    # Add title
-                    plotter.add_text(title, position='upper_edge', font_size=14, color='black')
-                
-                # Save screenshot
-                plotter.screenshot(fh_plane_vis_path)
-                plotter.close()
-                
-                print(f"  ✓ Frankfort plane landmarks visualization saved to {fh_plane_vis_path}")
-                
-                # Record mandible segmentation in transform JSON
+
+                    if removed_labels and not removed_landmarks:
+                        for rl in removed_labels:
+                            print(f"  Outlier '{rl}' excluded from plane fitting.")
+
+                # --- Check 3: lm10 / lm11 must lie further from centroid than
+                #     every kept muscle point (they should be the most lateral).
+                if not failure_reasons:
+                    print(f"\n  Lateral-extent check (lm10/lm11 further than muscles):")
+                    bad_lateral, lateral_info = check_landmarks_further_than_muscles(
+                        filtered_points, filtered_labels,
+                    )
+                    if bad_lateral:
+                        flagged_labels.update(bad_lateral)
+                        failure_reasons.append(
+                            f"Landmark(s) {bad_lateral} are not further from centroid than "
+                            f"the muscle points (max muscle distance "
+                            f"{lateral_info.get('max_muscle_distance', float('nan')):.2f} mm)."
+                        )
+
+                # Always render the 6-point landmark visualization, even if the
+                # scan will be rejected below. This gives the user an image for
+                # post-hoc inspection of skipped scans.
+                print(f"  Creating Frankfort plane landmarks visualization...")
+                status_text = None
+                if failure_reasons:
+                    status_text = "SCAN FLAGGED: " + " | ".join(failure_reasons)
+                try:
+                    render_frankfort_landmarks_visualization(
+                        scan_volume, points_6pt, point_labels_6pt,
+                        fh_plane_vis_path,
+                        removed_labels=removed_labels,
+                        flagged_labels=flagged_labels,
+                        status_text=status_text,
+                    )
+                    print(f"  ✓ Frankfort plane landmarks visualization saved to {fh_plane_vis_path}")
+                except Exception as _vis_err:
+                    print(f"  WARNING: Failed to render Frankfort visualization: {_vis_err}")
+
+                # Now raise if any check failed (image already saved).
+                if failure_reasons:
+                    raise _LandmarkOutlierError(
+                        f"{' '.join(failure_reasons)} "
+                        f"Symmetry details: {symmetry_info}. "
+                        f"Containment details: {containment_info}. "
+                        f"Lateral details: {lateral_info}. "
+                        f"Scan: '{scan_name}'."
+                    )
+
+                landmarks_for_plane = filtered_points
+
+                # Right / left muscle points for LR alignment (after outlier removal)
+                _right_labels = {'masseter_right', 'lateral_pterygoid_right'}
+                _left_labels  = {'masseter_left',  'lateral_pterygoid_left'}
+                right_muscle_points = np.array([
+                    p for lbl, p in zip(filtered_labels, filtered_points)
+                    if lbl in _right_labels
+                ])
+                left_muscle_points = np.array([
+                    p for lbl, p in zip(filtered_labels, filtered_points)
+                    if lbl in _left_labels
+                ])
+
+                # Fallback: if all muscle points on one side were removed as outliers
+                if len(right_muscle_points) == 0 or len(left_muscle_points) == 0:
+                    print("  WARNING: Insufficient muscle points for LR alignment after outlier removal.")
+                    print("           Falling back to lm10 / lm11 for left-right direction.")
+                    right_muscle_points = np.array([landmark_locations_world[10]])
+                    left_muscle_points  = np.array([landmark_locations_world[11]])
+
+                # Record in transform JSON
                 transform_data["transformations"].append({
                     "step": "9b",
-                    "operation": "craniofacial_segmentation",
+                    "operation": "head_muscles_segmentation",
                     "parameters": {
-                        "task": "craniofacial_structures",
-                        "reference": "Wasserthal et al. (2023) TotalSegmentator: Robust Segmentation of 104 Anatomic Structures in CT Images. Radiology: Artificial Intelligence. https://doi.org/10.1148/ryai.230024",
-                        "structures": ["mandible", "teeth_lower", "skull", "head", "sinus_maxillary", "sinus_frontal", "teeth_upper"],
-                        "mandible_points": {
-                            "left_top_mm": [float(x) for x in left_mandible_top],
-                            "right_top_mm": [float(x) for x in right_mandible_top]
-                        }
+                        "task": "head_muscles",
+                        "reference": (
+                            "Wasserthal et al. (2023) TotalSegmentator: Robust Segmentation of "
+                            "104 Anatomic Structures in CT Images. Radiology: Artificial Intelligence. "
+                            "https://doi.org/10.1148/ryai.230024"
+                        ),
+                        "structures": [
+                            "masseter_right", "masseter_left",
+                            "lateral_pterygoid_right", "lateral_pterygoid_left",
+                        ],
+                        "muscle_top_points_mm": {
+                            name: ([float(x) for x in pt] if pt is not None else None)
+                            for name, pt in [
+                                ('masseter_right',          masseter_right_top),
+                                ('masseter_left',           masseter_left_top),
+                                ('lateral_pterygoid_right', lat_pteryg_right_top),
+                                ('lateral_pterygoid_left',  lat_pteryg_left_top),
+                            ]
+                        },
+                        "missing_muscles": _missing_muscles,
+                        "outlier_detection": {
+                            "method": "centroid_distance",
+                            "threshold_ratio_muscle": OUTLIER_CENTROID_RATIO_MUSCLE,
+                            "threshold_ratio_landmark": OUTLIER_CENTROID_RATIO_LANDMARK,
+                            "removed_outliers": removed_labels,
+                            "lm10_lm11_symmetry_check": symmetry_info,
+                            "muscle_containment_check": containment_info,
+                            "lateral_extent_check": lateral_info,
+                            "rounds": [
+                                {
+                                    "distances_mm": rinfo['distances'],
+                                    "centroid_mm": rinfo['centroid'],
+                                    "median_distance_mm": rinfo['median_distance'],
+                                    "removed": rinfo['removed'],
+                                }
+                                for rinfo in all_round_info
+                            ],
+                        },
                     },
                     "output_file": seg_path,
-                    "visualization": fh_plane_vis_path
+                    "visualization": fh_plane_vis_path,
                 })
-                
+
             else:
                 # Standard mode: Extract landmarks 10-13 (indices 2-5) for plane computation
                 print(f"  Standard mode: Using landmarks 10-13 for Frankfort plane")
                 landmarks_for_plane = all_landmarks[2:6]
-            
+
             # Get mask points (threshold = 0 for resampled scans)
             mask_points = np.argwhere(img_tensor.cpu().numpy()[0, 0] > 0).astype(np.float32)
-            
-            # Align scan points
-            aligned_points, rotation, orig_normal, center, z_rotation_angle = align_to_horizontal(
-                mask_points, landmarks_for_plane
-            )
-            
+
+            # Align scan points — use SVD multipoint alignment in no_eyes mode
+            if no_eyes:
+                aligned_points, rotation, orig_normal, center, z_rotation_angle = \
+                    align_to_horizontal_multipoint(
+                        mask_points, landmarks_for_plane,
+                        right_muscle_points, left_muscle_points,
+                    )
+            else:
+                aligned_points, rotation, orig_normal, center, z_rotation_angle = \
+                    align_to_horizontal(mask_points, landmarks_for_plane)
+
             corrected_normal = np.array([0, 0, -1])
             angles = rotation.as_euler('xyz', degrees=True)
-            
+
             print(f"  Original Frankfort Plane Normal: {orig_normal}")
             print(f"  Corrected Plane Normal: {corrected_normal}")
             print(f"  Plane Center: {center}")
@@ -920,7 +1743,10 @@ def process_scans():
             
             # Determine alignment method description
             if no_eyes:
-                alignment_method_desc = "Frankfort plane (landmarks 10-11 + mandible top points)"
+                alignment_method_desc = (
+                    "Frankfort plane SVD (lm10, lm11 + masseter right/left + "
+                    "lateral pterygoid right/left — 6 points, outlier detection applied)"
+                )
             else:
                 alignment_method_desc = "Frankfort plane (landmarks 10-13)"
             
@@ -949,6 +1775,28 @@ def process_scans():
             
         except _AlignmentSkipped:
             pass  # skip_alignment=True — alignment intentionally skipped
+        except _LandmarkOutlierError as e:
+            print(f"\n{'!'*60}")
+            print(f"SCAN SKIPPED — landmark outlier detected:")
+            print(f"  {e}")
+            print(f"{'!'*60}\n")
+            # Log the skipped scan to a persistent file
+            skipped_file = os.path.join(output_dir, "skipped_scans.txt")
+            with open(skipped_file, 'a') as sf:
+                sf.write(f"{scan_name}\t{datetime.now().isoformat()}\t{e}\n")
+            print(f"  Logged to {skipped_file}")
+            # Save transform JSON for this scan
+            transform_data["transformations"].append({
+                "step": 10,
+                "operation": "frankfort_plane_alignment",
+                "status": "SKIPPED_OUTLIER",
+                "error": str(e),
+            })
+            try:
+                save_transform_json(transform_data, scan_name, output_transform_dir)
+            except Exception:
+                pass
+            continue  # skip this scan, proceed with remaining scans
         except Exception as e:
             print(f"ERROR: Alignment failed for {scan_name}")
             print(f"Error type: {type(e).__name__}")

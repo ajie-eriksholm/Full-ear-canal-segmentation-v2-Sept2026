@@ -40,6 +40,16 @@ LANDMARKS_TO_CROP = [
     (3, 11, 'left_ear', [20, 10, -5], False),   # landmark_11 - left ear (x will be flipped)
 ]
 
+NIFTI_EXTENSIONS = ('.nii.gz', '.nii')
+
+
+def strip_nifti_extension(filename):
+    """Strip .nii or .nii.gz extension from a filename."""
+    for ext in NIFTI_EXTENSIONS:
+        if filename.endswith(ext):
+            return filename[:-len(ext)]
+    return filename
+
 
 # === Helper Functions ===
 def initialize_transform_json(scan_path, scan_name, aligned_scan_shape, affine, step_number=11):
@@ -216,19 +226,19 @@ def process_scans():
     # When skip_alignment=True, use the original resampled scans; otherwise use aligned scans
     aligned_scans = []
     if skip_alignment:
-        scan_suffix = '_CT_resampled_256.nii.gz'
+        scan_stem_suffix = '_CT_resampled_256'
         for root, dirs, files in os.walk(Processed_scans_dir):
             for file in files:
-                if file.endswith(scan_suffix):
+                if strip_nifti_extension(file).endswith(scan_stem_suffix):
                     aligned_scans.append(os.path.join(root, file))
-        print(f"skip_alignment=True: using resampled scans (*{scan_suffix})")
+        print(f"skip_alignment=True: using resampled scans (*{scan_stem_suffix}.nii[.gz])")
     else:
-        scan_suffix = '_aligned.nii.gz'
+        scan_stem_suffix = '_aligned'
         for root, dirs, files in os.walk(Processed_scans_dir):
             for file in files:
-                if file.endswith(scan_suffix):
+                if strip_nifti_extension(file).endswith(scan_stem_suffix):
                     aligned_scans.append(os.path.join(root, file))
-        print(f"skip_alignment=False: using aligned scans (*{scan_suffix})")
+        print(f"skip_alignment=False: using aligned scans (*{scan_stem_suffix}.nii[.gz])")
     
     aligned_scans = sorted(aligned_scans)
     print(f"Found {len(aligned_scans)} scans to process\n")
@@ -241,7 +251,8 @@ def process_scans():
     for aligned_scan_path in tqdm(aligned_scans, desc="Processing scans"):
         # Extract scan name
         filename = os.path.basename(aligned_scan_path)
-        scan_name = filename.replace(scan_suffix, '')
+        scan_stem = strip_nifti_extension(filename)
+        scan_name = scan_stem[:-len(scan_stem_suffix)] if scan_stem.endswith(scan_stem_suffix) else scan_stem
         
         # Check if scan is in excluded list
         if scan_name in excluded_patient_ids:

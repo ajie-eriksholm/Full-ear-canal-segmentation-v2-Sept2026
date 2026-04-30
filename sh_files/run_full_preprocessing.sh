@@ -22,7 +22,7 @@ OUTPUT_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/test_scan/Output"
 
 
 # Processing options
-NO_EYES="False"              # Set to "True" if scans don't include eyes
+NO_EYES="True"              # Set to "True" if scans don't include eyes
 SKIP_ALIGNMENT="False"       # Set to "True" to skip alignment step
 
 # Python environments
