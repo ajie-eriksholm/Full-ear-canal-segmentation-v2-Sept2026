@@ -2780,24 +2780,37 @@ def load_cbj_landmarks_from_json(json_path: str) -> Optional[np.ndarray]:
             data = json.load(f)
         
         if 'landmarks' not in data or len(data['landmarks']) == 0:
+            print(f"    ⚠ No landmarks found in JSON file")
             return None
+        
+        print(f"    Found {len(data['landmarks'])} total landmarks in JSON")
         
         # Extract CBJ positions — look for labels starting with "CBJ"
         positions = []
+        cbj_labels_found = []
+        all_labels = []
+        
         for landmark in data['landmarks']:
             label = landmark.get('label', '')
+            all_labels.append(label)
             if label.upper().startswith('CBJ') and 'position' in landmark and landmark['position'] is not None:
                 pos = landmark['position']
                 positions.append(pos)
+                cbj_labels_found.append(label)
                 print(f"    {label}: {pos} (x={pos[0]:.1f}, y={pos[1]:.1f}, z={pos[2]:.1f})")
         
         if len(positions) == 0:
+            print(f"    ⚠ No CBJ landmarks found (labels starting with 'CBJ')")
+            print(f"    Available labels: {', '.join(all_labels)}")
             return None
         
+        print(f"    ✓ Loaded {len(positions)} CBJ landmarks: {', '.join(cbj_labels_found)}")
         return np.array(positions)
         
     except Exception as e:
         print(f"    ⚠ Warning: Could not load CBJ landmarks from {json_path}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 

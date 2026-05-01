@@ -932,26 +932,58 @@ def process_single_sample(
                     print(f"  ✓ Successfully loaded {len(cbj_points)} CBJ landmark points from:")
                     print(f"    {cbj_landmarks_path}")
                     
-                    # CRITICAL: Do NOT transform CBJ points
-                    # CBJ landmarks are from a separate source (e.g., annotated separately)
-                    # and are ALREADY in the correct coordinate system.
-                    # The main landmarks (Top RS, Bottom RS, Eardrum) are what needed the transformation,
-                    # not the CBJ points. Applying the same transformation to CBJ moves them off-mesh.
+                    # CRITICAL: If main landmarks were transformed, apply the same transformation to CBJ points
+                    # Since CBJ landmarks are now in the same unified JSON file, they have the same coordinate
+                    # system issues as the main landmarks and need the same correction
+                    if transform_applied != "original":
+                        print(f"  → Applying same coordinate transformation to CBJ landmarks: {transform_applied}")
+                        print(f"    Original CBJ points:")
+                        for i, p in enumerate(cbj_points):
+                            print(f"      CBJ{i+1}: [{p[0]:.1f}, {p[1]:.1f}, {p[2]:.1f}]")
+                        
+                        # Apply the transformation that was used for main landmarks
+                        if transform_applied == "(-x, -y, z)":
+                            cbj_points = np.array([[-p[0], -p[1], p[2]] for p in cbj_points])
+                        elif transform_applied == "(-x, y, z)":
+                            cbj_points = np.array([[-p[0], p[1], p[2]] for p in cbj_points])
+                        elif transform_applied == "(x, -y, z)":
+                            cbj_points = np.array([[p[0], -p[1], p[2]] for p in cbj_points])
+                        elif transform_applied == "(-x, -y, -z)":
+                            cbj_points = np.array([[-p[0], -p[1], -p[2]] for p in cbj_points])
+                        elif transform_applied == "(z, y, x)":
+                            cbj_points = np.array([[p[2], p[1], p[0]] for p in cbj_points])
+                        elif transform_applied == "(-z, y, -x)":
+                            cbj_points = np.array([[-p[2], p[1], -p[0]] for p in cbj_points])
+                        elif transform_applied == "(y, x, z)":
+                            cbj_points = np.array([[p[1], p[0], p[2]] for p in cbj_points])
+                        elif transform_applied == "(-y, -x, -z)":
+                            cbj_points = np.array([[-p[1], -p[0], -p[2]] for p in cbj_points])
+                        
+                        print(f"    Transformed CBJ points:")
+                        for i, p in enumerate(cbj_points):
+                            print(f"      CBJ{i+1}: [{p[0]:.1f}, {p[1]:.1f}, {p[2]:.1f}]")
                     
-                    # Simply verify CBJ points are inside bounds and use as-is
+                    # Verify CBJ points are inside bounds
                     cbj_inside_bounds = sum(1 for p in cbj_points 
-                                           if isinstance(p, (list, tuple)) and len(p) >= 3 and
+                                           if isinstance(p, (list, tuple, np.ndarray)) and len(p) >= 3 and
                                            mesh.bounds[0] <= p[0] <= mesh.bounds[1] and
                                            mesh.bounds[2] <= p[1] <= mesh.bounds[3] and
                                            mesh.bounds[4] <= p[2] <= mesh.bounds[5])
                     
                     if cbj_inside_bounds == len(cbj_points):
-                        print(f"  ✓ CBJ points already in correct coordinate system ({cbj_inside_bounds}/{len(cbj_points)} inside bounds)")
+                        print(f"  ✓ CBJ points in correct coordinate system ({cbj_inside_bounds}/{len(cbj_points)} inside bounds)")
+                        cbj_loaded = True
                     else:
-                        # Warn if some CBJ points are outside bounds, but use them as-is anyway
-                        print(f"  ⚠ {len(cbj_points) - cbj_inside_bounds}/{len(cbj_points)} CBJ points outside bounds (but using as-is)")
-                    
-                    cbj_loaded = True
+                        print(f"  ⚠ {len(cbj_points) - cbj_inside_bounds}/{len(cbj_points)} CBJ points outside bounds")
+                        if cbj_inside_bounds > 0:
+                            # Some points inside, continue with warning
+                            print(f"    Continuing with {cbj_inside_bounds} valid CBJ points")
+                            cbj_loaded = True
+                        else:
+                            # All points outside, don't use them
+                            print(f"    All CBJ points outside bounds - CBJ processing will be skipped")
+                            cbj_points = None
+                            cbj_loaded = False
                 else:
                     print(f"  ⚠ CBJ landmarks file exists but contains no valid points")
                     print(f"    File: {cbj_landmarks_path}")
@@ -2085,6 +2117,9 @@ def process_single_sample(
         if cbj_points is not None and len(cbj_points) >= 3:
             print(f"\n[STEP 11b] Processing CBJ landmarks")
             print(f"  Using {len(cbj_points)} CBJ landmark points loaded in STEP 3b")
+            print(f"  CBJ points:")
+            for i, pt in enumerate(cbj_points):
+                print(f"    CBJ{i+1}: [{pt[0]:.1f}, {pt[1]:.1f}, {pt[2]:.1f}]")
             
             try:
                 cbj_plane_normal, cbj_plane_centroid = fit_plane_to_cbj_points(cbj_points)
@@ -2228,10 +2263,19 @@ def process_single_sample(
                 import traceback
                 traceback.print_exc()
         else:
-            if cbj_points is not None and len(cbj_points) > 0:
-                print(f"\n[STEP 11b] Skipping CBJ processing (only {len(cbj_points)} CBJ landmark point(s) available, need at least 3)")
+            print(f"\n[STEP 11b] Skipping CBJ processing")
+            print(f"  Reason: ", end="")
+            if cbj_points is None:
+                print(f"cbj_points is None (no CBJ landmarks loaded)")
+            elif len(cbj_points) == 0:
+                print(f"cbj_points is empty list")
+            elif len(cbj_points) < 3:
+                print(f"only {len(cbj_points)} CBJ landmark point(s) available, need at least 3")
+                print(f"  Available CBJ points:")
+                for i, pt in enumerate(cbj_points):
+                    print(f"    CBJ{i+1}: [{pt[0]:.1f}, {pt[1]:.1f}, {pt[2]:.1f}]")
             else:
-                print(f"\n[STEP 11b] Skipping CBJ processing (no CBJ landmarks provided in STEP 3b)")
+                print(f"unknown reason (cbj_points={cbj_points})")
         
         # =====================================================================
         # STEP 11c: Add CBJ cross-section data to landmarks JSON (optional)

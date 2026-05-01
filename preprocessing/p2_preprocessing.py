@@ -1225,7 +1225,44 @@ def process_scans():
     
     # Store flagged scans with large rotation angles
     flagged_scans = []
-    
+
+    # ---- Pre-load existing CSV rows so previously-processed scans can be skipped ----
+    # Skip a scan if BOTH:
+    #   - {scan_name}_lm_aligned.npy exists in aligned_npy_dir
+    #   - a row with that scan_name exists in all_aligned_landmarks.csv
+    # We preload existing rows from both CSVs so that re-writing the CSVs at the
+    # end preserves entries for the skipped scans.
+    existing_aligned_csv = os.path.join(aligned_landmarks_dir, "all_aligned_landmarks.csv")
+    existing_predictions_csv = os.path.join(aligned_landmarks_dir, "all_landmark_predictions.csv")
+    aligned_scan_names_in_csv = set()
+
+    def _load_csv_rows(csv_path):
+        if not os.path.exists(csv_path):
+            return []
+        try:
+            with open(csv_path, 'r', newline='') as f:
+                reader = csv.DictReader(f)
+                return [dict(row) for row in reader]
+        except Exception as e:
+            print(f"  WARNING: Could not read existing CSV {csv_path}: {e}")
+            return []
+
+    if not skip_alignment:
+        existing_aligned_rows = _load_csv_rows(existing_aligned_csv)
+        for row in existing_aligned_rows:
+            sn = row.get('scan_name')
+            if sn:
+                aligned_scan_names_in_csv.add(sn)
+                all_aligned_landmarks.append(row)
+
+        existing_pred_rows = _load_csv_rows(existing_predictions_csv)
+        # Index predictions by scan_name to avoid duplicates from previous runs
+        existing_pred_by_name = {}
+        for row in existing_pred_rows:
+            sn = row.get('scan_name')
+            if sn:
+                existing_pred_by_name[sn] = row
+
     # Process each scan
     for nii_path in tqdm(nii_files, desc="Processing scans"):
         # Extract scan/patient name
@@ -1235,6 +1272,22 @@ def process_scans():
         print(f"\n{'='*60}")
         print(f"Processing: {scan_name}")
         print(f"{'='*60}")
+
+        # Skip if P2 already completed for this scan (npy + CSV row both present).
+        # Only applies when alignment is not skipped, since skip_alignment runs do
+        # not produce the aligned npy / CSV row.
+        if not skip_alignment:
+            aligned_lm_path_check = os.path.join(aligned_npy_dir, f"{scan_name}_lm_aligned.npy")
+            if (os.path.exists(aligned_lm_path_check)
+                    and scan_name in aligned_scan_names_in_csv):
+                print(f"P2 already complete for {scan_name} "
+                      f"(found {aligned_lm_path_check} and row in all_aligned_landmarks.csv). Skipping.")
+                # Preserve existing predictions row for this scan (already loaded into
+                # all_aligned_landmarks above); also re-add prediction row if present.
+                pred_row = existing_pred_by_name.get(scan_name)
+                if pred_row is not None:
+                    all_predictions.append(pred_row)
+                continue
         
         # Create output directory for this scan
         scan_landmarks_dir = os.path.join(landmarks_output_dir, scan_name)

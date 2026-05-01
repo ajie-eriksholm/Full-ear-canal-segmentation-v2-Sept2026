@@ -24,9 +24,9 @@
 # ==============================================================================
 
 # --- Directory paths ---
-RAW_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/HighRes_noeyes/Raw"
-PROCESSED_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/HighRes_noeyes/Processed-Data"
-OUTPUT_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/HighRes_noeyes/Output"
+RAW_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/tcia_noeyes/Raw"
+PROCESSED_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/tcia_noeyes/Processed-Data"
+OUTPUT_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/tcia_noeyes/Output"
 
 # --- Processing options ---
 NO_EYES="True"              # Set to "True" if scans don't include eyes

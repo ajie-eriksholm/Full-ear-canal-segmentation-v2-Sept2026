@@ -42,13 +42,13 @@ import vtk
 # CONFIGURATION  — edit these paths before running
 # ============================================================================
 
-input_dir    = "/projects/oticon/erhdata/Processed-Data/PAPD/EarScans/Images/HighRes_refined_2"
+input_dir    = "/projects/oticon/erhdata/Processed-Data/SBEO/HighRes_noeyes/Output/Metrics"
 
 metadata_csv = [
-    "/projects/oticon/erhdata/Processed-Data/SBEO/Features_csv/HighRes_refined_2/metadata_HighRes.csv"
+    "/projects/oticon/erhdata/Processed-Data/SBEO/HighRes_noeyes/highres_metadata.csv",
 ]
 
-output_dir   = "/projects/oticon/erhdata/Processed-Data/SBEO/Features_csv/HighRes_refined_2"
+output_dir   = "/projects/oticon/erhdata/Processed-Data/SBEO/HighRes_noeyes/Webpage_features"
 
 #create output_dir if it doesn't exist, but be careful not to accidentally overwrite something important!
 os.makedirs(output_dir, exist_ok=True)
@@ -150,16 +150,17 @@ def save_pseudonym_mapping(mapping_dict, mapping_csv):
     print(f"  Total mappings: {len(mapping_dict)}")
 
 
-def generate_pseudonym(counter):
-    """Generate a base pseudonym in format patient_00001.
+def generate_pseudonym(counter, ear_side):
+    """Generate a full pseudonym in format patient_00001_left.
     
     Args:
         counter: integer counter for the pseudonym
+        ear_side: 'left' or 'right'
     
     Returns:
-        str: base pseudonym like 'patient_00001'
+        str: full pseudonym like 'patient_00001_left'
     """
-    return f"patient_{counter:05d}"
+    return f"patient_{counter:05d}_{ear_side}"
 
 
 def patient_base_id(patient_id):
@@ -168,16 +169,20 @@ def patient_base_id(patient_id):
     Example:
       CHUM-001_left_ear  -> CHUM-001
       CHUM-001_right_ear -> CHUM-001
+      0522c0014_left     -> 0522c0014
+      0522c0014_right    -> 0522c0014
     """
-    return re.sub(r"_(left|right)_ear$", "", str(patient_id).strip(), flags=re.IGNORECASE)
+    return re.sub(r"_(left|right)(_ear)?$", "", str(patient_id).strip(), flags=re.IGNORECASE)
 
 
 def patient_ear_side(patient_id):
     """Return normalized ear side: 'left' or 'right' (fallback: 'unknown')."""
     pid = str(patient_id).lower()
-    m = re.search(r"_(left|right)_ear$", pid)
+    # Check for explicit patterns first
+    m = re.search(r"_(left|right)(_ear)?$", pid)
     if m:
         return m.group(1)
+    # Fallback: search anywhere in the string
     if "left" in pid:
         return "left"
     if "right" in pid:
@@ -198,35 +203,25 @@ def compose_ear_pseudonym(base_pseudonym, ear_side):
     return f"{base_pseudonym}_{ear_side}"
 
 
-def normalize_mapping_to_patient_base(existing_mapping):
-    """Normalize mapping keys to base patient IDs (left/right collapse together)."""
-    base_mapping = {}
-    for orig_pid, pseudo in sorted(existing_mapping.items()):
-        base_pid = patient_base_id(orig_pid)
-        if base_pid not in base_mapping:
-            base_mapping[base_pid] = pseudo
-    return base_mapping
-
-
 def update_pseudonym_mapping(patient_ids, existing_mapping):
-    """Update base pseudonym mapping with new patients (not per-ear).
+    """Update pseudonym mapping with new patients at ear level (includes left/right).
     
     Args:
         patient_ids: list of original ear-level IDs to process
-        existing_mapping: dict of {base_patient_id: base_pseudonym}
+        existing_mapping: dict of {patient_id: pseudonym}
     
     Returns:
-        dict: updated mapping {base_patient_id: base_pseudonym}
+        dict: updated mapping {patient_id: pseudonym}
     """
     mapping = existing_mapping.copy()
-    base_patient_ids = sorted({patient_base_id(pid) for pid in patient_ids})
     
-    # Find the next available counter
+    # Find the next available counter by looking at existing pseudonyms
     if mapping:
         existing_pseudonyms = set(mapping.values())
         existing_numbers = []
         for pseudo in existing_pseudonyms:
-            m = re.search(r"_(\d+)$", str(pseudo))
+            # Extract number from pattern like patient_00001_left
+            m = re.search(r"patient_(\d+)_", str(pseudo))
             if m:
                 try:
                     existing_numbers.append(int(m.group(1)))
@@ -236,13 +231,40 @@ def update_pseudonym_mapping(patient_ids, existing_mapping):
     else:
         next_counter = 1
     
-    # Add new patient IDs
+    # Group patient IDs by base ID to assign same counter to left/right pairs
+    base_to_ears = {}
+    for pid in patient_ids:
+        base_pid = patient_base_id(pid)
+        ear_side = patient_ear_side(pid)
+        if base_pid not in base_to_ears:
+            base_to_ears[base_pid] = []
+        base_to_ears[base_pid].append((pid, ear_side))
+    
+    # Add new patient IDs (with same counter for both ears of same patient)
     new_count = 0
-    for base_pid in base_patient_ids:
-        if base_pid not in mapping:
-            mapping[base_pid] = generate_pseudonym(next_counter)
+    for base_pid in sorted(base_to_ears.keys()):
+        # Check if any ear from this patient already has a mapping
+        existing_counter = None
+        for pid, ear_side in base_to_ears[base_pid]:
+            if pid in mapping:
+                # Extract counter from existing pseudonym
+                m = re.search(r"patient_(\d+)_", mapping[pid])
+                if m:
+                    existing_counter = int(m.group(1))
+                    break
+        
+        # Use existing counter or assign new one
+        if existing_counter is None:
+            counter = next_counter
             next_counter += 1
-            new_count += 1
+        else:
+            counter = existing_counter
+        
+        # Assign pseudonyms to both ears
+        for pid, ear_side in base_to_ears[base_pid]:
+            if pid not in mapping:
+                mapping[pid] = generate_pseudonym(counter, ear_side)
+                new_count += 1
     
     if new_count > 0:
         print(f"  Generated {new_count} new pseudonyms")
@@ -1026,8 +1048,8 @@ def main():
 
     # ── Load/update pseudonym mapping ─────────────────────────────────────
     print("Loading pseudonym mapping...")
-    existing_mapping_raw = load_pseudonym_mapping(pseudonym_mapping_csv)
-    existing_mapping = normalize_mapping_to_patient_base(existing_mapping_raw)
+    # Load existing mapping at ear level (includes left/right)
+    existing_mapping = load_pseudonym_mapping(pseudonym_mapping_csv)
     print(f"  Existing mappings: {len(existing_mapping)}")
     
     # Update mapping with all discovered patient IDs (even those we might skip)
@@ -1084,11 +1106,8 @@ def main():
 
             results.append(row)
 
-            # Get patient-based pseudonym and append ear side
-            pid_base_for_pseudo = patient_base_id(pid)
-            ear_side = patient_ear_side(pid)
-            base_pseudonym = all_mapping.get(pid_base_for_pseudo, pid_base_for_pseudo)
-            pseudonym = compose_ear_pseudonym(base_pseudonym, ear_side)
+            # Get full pseudonym (already includes ear side)
+            pseudonym = all_mapping.get(pid, pid)
             pseudonym_base = pseudonym
             
             # Copy STL to output folder, renaming with pseudonym
@@ -1159,18 +1178,12 @@ def main():
             df[col] = float("nan")
     df = df[OUTPUT_COLUMNS]
     
-    # Apply pseudonymization to patient_id and EarID columns using patient-based IDs + side
+    # Apply pseudonymization to patient_id and EarID columns (already includes ear side)
     df['patient_id'] = df['patient_id'].apply(
-        lambda x: compose_ear_pseudonym(
-            all_mapping.get(patient_base_id(x), patient_base_id(x)),
-            patient_ear_side(x),
-        )
+        lambda x: all_mapping.get(x, x)
     )
     df['EarID'] = df['EarID'].apply(
-        lambda x: compose_ear_pseudonym(
-            all_mapping.get(patient_base_id(x + '_ear'), patient_base_id(x + '_ear')),
-            patient_ear_side(x + '_ear'),
-        )
+        lambda x: all_mapping.get(x + '_ear', x) if not x.endswith('_ear') else all_mapping.get(x, x)
     )
     
     df.to_csv(output_csv, index=False)
