@@ -16,6 +16,7 @@ BF_48_RUN = "run_20260210_103433"
 BF_64_RUN = "run_20260210_104123"
 BF_32_ED_RUN = "run_20260210_104800"
 BF_48_ED_RUN = "run_20260210_105409"
+BF_48_RETRAIN_RUN = "run_20260507_125450"
 
 TEST_DIR = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Output/Test Ears-Thin Canal"
 MODEL_PATH_TEMPLATE = "/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Logs/{}/best_model.pth"
@@ -56,6 +57,7 @@ MODEL_CONFIGS = [
     (BF_64_RUN, "late_divergence", 64, 2),
     (BF_32_ED_RUN, "early_divergence", 32, 2),
     (BF_48_ED_RUN, "early_divergence", 48, 2),
+    (BF_48_RETRAIN_RUN, "early_divergence", 48, 2),
 ]
 
 # ============================================================

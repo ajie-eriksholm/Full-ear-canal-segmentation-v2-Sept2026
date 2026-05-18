@@ -21,6 +21,7 @@
   - [Bone Segmentation Inference](#bone-segmentation-inference-modeltest_bonepy)
   - [Postprocessing](#postprocessing-postprocessinggenerate_resultspy)
   - [Metric Extraction](#metric-extraction-metric_extractionpipelinepy)
+- [Bend Artifact Removal (Optional)](#bend-artifact-removal-optional-postprocessingbend_artifact_removalpy)
 - [Retraining Scripts](#retraining-scripts)
   - [Retraining FH Alignment Model](#retraining-fh-alignment-model)
   - [Retraining Tissue vs Air Segmentation and Landmark Placement](#retraining-tissue-vs-air-segmentation-and-landmark-placement)
@@ -609,7 +610,74 @@ The `processing_results.csv` contains per-sample measurements including:
 
 ---
 
+## Bend Artifact Removal (Optional) (`postprocessing/bend_artifact_removal.py`)
 
+**Environment:** `landmark_env`
+
+Standalone post-hoc utility that removes the flat "bend" artefact from the tissue/air STL meshes produced by the main pipeline. This artefact is the soft-tissue sheet that appears where the 90×90×90 voxel ear ROI (cropped in P3) cuts through the head — it shows up as a flat plane in the STL and can clutter 3D visualisations.
+
+This script is **not** part of the main pipeline and is **not invoked** by `run_full_pipeline.sh`. Run it on its own, after `generate_results.py` has produced the STL files in `Output/Results/stl/`.
+
+#### How It Works
+
+1. Reads the P2 transform log (`Output/Logs/transform_logs/{patient_id}_transform_log_P2.json`) to recover the Frankfort-plane rotation matrix.
+2. Computes the bend plane normal by applying the inverse P2 rotation to the original-CT +Z axis (and mirroring the X component for the left ear, to match P3's left-side mirroring).
+3. Sweeps a plane with that fixed normal upward along world +Z and locks onto the offset with the most surface inliers (the flat sheet).
+4. Clips the mesh, keeping the +normal side (the anatomy above the bend), then retains the largest connected component.
+5. If no strong flat sheet is detected (low inlier fraction or weak peak), the mesh is saved unmodified.
+6. Saves a cleaned STL per ear and a side-by-side before/after PNG visualisation.
+
+#### Running It
+
+The script is configured via constants at the top of the file (no CLI arguments). Edit these before running:
+
+```python
+# postprocessing/bend_artifact_removal.py
+STL_DIR    = "/path/to/Output/Results/stl"
+LOG_DIR    = "/path/to/Output/Logs/transform_logs"
+OUTPUT_DIR = "/path/to/bend_removal_output"
+
+NUM_SAMPLES = None   # None = process every patient; or set an int to sample N at random
+RANDOM_SEED = 42
+```
+
+Then:
+
+```bash
+source landmark_env/bin/activate
+python postprocessing/bend_artifact_removal.py
+```
+
+The script auto-discovers patients that have both `{patient_id}_left.stl` and `{patient_id}_right.stl` in `STL_DIR` and a matching `{patient_id}_transform_log_P2.json` in `LOG_DIR`.
+
+#### Tunable Parameters
+
+Most defaults work out of the box; adjust at the top of the file only if a particular dataset misbehaves:
+
+| Constant | Default | Purpose |
+|---|---|---|
+| `FACE_INLIER_TOL` | `1.5` mm | Plane thickness used when counting inliers during the sweep. |
+| `OFFSET_STEP_MM` | `0.25` mm | Plane sweep step along world +Z. |
+| `CLIP_MARGIN_MM` | `1.5` mm | Extra offset added to the clip plane so the cut sits just inside the bend. |
+| `MIN_BEND_INLIER_FRAC` | `0.05` | Skip clipping if the best plane contains fewer than 5% of the mesh points. |
+| `MIN_BEND_PEAK_RATIO` | `4.0` | Skip clipping if the best plane is not at least 4× denser than the average sweep slice. |
+| `KEEP_SIDE` | `"+"` | Side of the plane to keep along the bend normal (`"+"`, `"-"`, `"auto"`, `"auto_inv"`). |
+| `MANUAL_BEND_OFFSET` | `None` | Force a fixed bend offset (mm along the normal); bypasses the sweep. |
+
+#### Output
+
+For each processed patient:
+
+```
+OUTPUT_DIR/
+├── {patient_id}_left_no_bend.stl
+├── {patient_id}_right_no_bend.stl
+└── {patient_id}_bend_removal.png   # 4-row before/after comparison (iso + side views)
+```
+
+STLs where no bend was detected are still saved (suffixed `_no_bend.stl`) but contain the original geometry unchanged.
+
+---
 
 ## Retraining Scripts
 

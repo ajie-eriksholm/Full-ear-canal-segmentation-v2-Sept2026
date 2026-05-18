@@ -42,13 +42,15 @@ import vtk
 # CONFIGURATION  — edit these paths before running
 # ============================================================================
 
-input_dir    = "/projects/oticon/erhdata/Processed-Data/SBEO/HighRes_noeyes/Output/Metrics"
+input_dir    = "/projects/oticon/erhdata/Processed-Data/SBEO/HECKTOR_noeyes/Output/Metrics"
 
 metadata_csv = [
-    "/projects/oticon/erhdata/Processed-Data/SBEO/HighRes_noeyes/highres_metadata.csv",
+    "/projects/oticon/erhdata/Raw/EarScans/Images/HECKTOR 2025 Training Data/Task 1/HECKTOR_2025_Training_Task_1.csv",
+    "/projects/oticon/erhdata/Raw/EarScans/Images/HECKTOR 2025 Training Data/Task 2/HECKTOR_2025_Training_Task_2.csv",
+    "/projects/oticon/erhdata/Raw/EarScans/Images/HECKTOR 2025 Training Data/Task 3/HECKTOR_2025_Training_Task_3.csv",
 ]
 
-output_dir   = "/projects/oticon/erhdata/Processed-Data/SBEO/HighRes_noeyes/Webpage_features"
+output_dir   = "/projects/oticon/erhdata/Processed-Data/SBEO/HECKTOR_noeyes/Webpage_features"
 
 #create output_dir if it doesn't exist, but be careful not to accidentally overwrite something important!
 os.makedirs(output_dir, exist_ok=True)
@@ -1198,7 +1200,7 @@ def main():
     # Covers: (1) missing values in centerline CSV, (2) missing required output columns
     total_excluded = len(cl_excluded) + len(output_excluded)
     excl_path = os.path.join(output_dir, "excluded_participants.txt")
-    with open(excl_path, "w") as f:
+    with open(excl_path, "w", encoding="utf-8") as f:
         f.write("EXCLUDED PARTICIPANTS\n")
         f.write(f"Output CSV : {output_csv}\n")
         f.write(f"Total excluded: {total_excluded}  "
@@ -1238,7 +1240,7 @@ def main():
     # vol_issues captures errors that occurred during extraction;
     # participants with unresolved NaN volumes are already in output_excluded.
     diag_path = os.path.join(output_dir, "volume_diagnostics.txt")
-    with open(diag_path, "w") as f:
+    with open(diag_path, "w", encoding="utf-8") as f:
         f.write("VOLUME METRIC DIAGNOSTICS\n")
         f.write(f"Generated from: {output_csv}\n")
         f.write(f"Total participants: {len(df)}  |  "

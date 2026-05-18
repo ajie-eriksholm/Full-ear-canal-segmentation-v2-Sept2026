@@ -1,131 +1,117 @@
 
 #!/bin/bash
-# ============================================================================== 
-# Retraining Pipeline: Full Preprocessing + Training
-# ============================================================================== 
-# This script runs all preprocessing steps (P1-P4) in sequence, then starts training.
-# Edit the variables below to customize paths and settings
-# bash sh_files/run_retrain_tissue_air.sh
+#$ -N Retrain_Tissue_Air               # Job name
+#$ -cwd                                # Run in current working directory
+#$ -l nvgpu=1                          # Request 1 NVIDIA GPU
+#$ -l gputype=rtx*                     # Request RTX series GPU
+#$ -l cores=8                         # Request 16 CPU cores
+#$ -l mem_free=64G                     # Request 64 GB of RAM
+#$ -o retrain_tissue_air_3.log           # Standard output log
+#$ -e retrain_tissue_air_3_err.log       # Standard error log
+#$ -dl 203501010000                    # Hard deadline by which the job must finish (GPU branch here).
+
 # ==============================================================================
+# Retraining Pipeline: Tissue/Air model
+# ==============================================================================
+# Inputs in $RAW_SCANS_DIR are assumed to already be cropped, resampled to
+# 128x128x128, and intensity-normalized to [0, 1] (i.e. they are the equivalent
+# of P4_Normalized_Ears output). Files must be named:
+#     <patient>_left_ear.nii.gz
+#     <patient>_right_ear.nii.gz
+# Therefore P1-P4 are skipped. The script:
+#   1. Stages CTs into P4_Normalized_Ears/ with the nnUNet "_0000" suffix.
+#   2. Generates landmark heatmaps from the JSON markups.
+#   3. Trains the tissue/air model.
+#
+# Submit to cluster: qsub sh_files/run_retrain_tissue_air.sh
+# Run locally:      bash sh_files/run_retrain_tissue_air.sh
+# ==============================================================================
+
+# Anchor to the repo root so paths work both locally and under qsub
+# (under SGE, BASH_SOURCE points to the spool copy of this script).
+PROJECT_ROOT="$HOME/Full-ear-canal-segmentation"
+cd "$PROJECT_ROOT"
 
 # Directory paths
 RETRAIN_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/Retrain_Tissue_Air"
-RAW_SCANS_DIR="$RETRAIN_DIR/CTs_Raw"
-PROCESSED_SCANS_DIR="$RETRAIN_DIR/CTs_Processed"
+RAW_SCANS_DIR="$RETRAIN_DIR/CTs_Raw"           # Already-cropped, 128^3, normalized ear CTs
 OUTPUT_DIR="$RETRAIN_DIR/Output"
 HEATMAP_DIR="$RETRAIN_DIR/Heatmaps"
 LOG_DIR="$RETRAIN_DIR/Logs"
-JSON_DIR="/projects/oticon/erhdata/Raw/EarScans/Images/HECKTOR 2025 Training Data/Annotations/landmarks/ear_anatomical_landmarks_train"
-SEG_DIR="/projects/oticon/erhdata/Raw/EarScans/Images/HECKTOR 2025 Training Data/Annotations/segmentations/ear_masks_train"
+JSON_DIR="$RETRAIN_DIR/GT/Markups"             # *.mrk.json landmark files
+SEG_DIR="$RETRAIN_DIR/GT/Masks"                # *.nrrd segmentation masks
 
-# Processing options
-NO_EYES="False"
-SKIP_ALIGNMENT="False"
-LANDMARK_MODEL="/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/best_model_2025-12-05_13-16-35.pth"
-ACCEPTABLE_PATIENTID_CSV="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/acceptable_patientid.csv"
-PRE_QUALITY_ASSESSED="False"
-EXCLUDED_SCANS_CSV="/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-scans/Excluded_scans_cropping.csv"
+# Staged inputs for the trainer (nnUNet naming convention with _0000 suffix)
+STAGED_CT_DIR="$OUTPUT_DIR/Preprocessing/P4_Normalized_Ears"
 
-# Python environments
-SEG_ENV="./seg_env"
+# Python environment (P2-P4 envs no longer needed since preprocessing is skipped)
 LANDMARK_ENV="./landmark_env"
 
-
-# Preprocessing scripts location
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-PREPROCESSING_DIR="$PROJECT_ROOT/preprocessing"
-
 # Number of epochs for training
-EPOCHS=10
+EPOCHS=300
 
-# Ensure output directories exist
-mkdir -p "$HEATMAP_DIR" "$LOG_DIR"
+mkdir -p "$STAGED_CT_DIR" "$HEATMAP_DIR" "$LOG_DIR"
 
 set -e
 
-# ============================================================================== 
-# P1: Initial Preprocessing
+# ==============================================================================
+# Stage inputs: symlink *_left_ear.nii.gz / *_right_ear.nii.gz into the trainer
+# input directory with the "_0000" suffix expected by the nnUNet-style pipeline.
+# Symlinks (rather than copies) keep disk usage minimal and preserve a single
+# source of truth in CTs_Raw.
 # ==============================================================================
 echo "=================================================="
-echo "STEP 1/4: Running P1 - Initial Preprocessing"
+echo "STEP 1/3: Staging CTs into $STAGED_CT_DIR"
 echo "=================================================="
-echo "Activating seg_env for P1..."
-source "$SEG_ENV/bin/activate"
 
-python "$PREPROCESSING_DIR/p1_preprocessing.py" \
-  --raw_scans_dir "$RAW_SCANS_DIR" \
-  --processed_scans_dir "$PROCESSED_SCANS_DIR" \
-  --output_dir "$OUTPUT_DIR" \
-  --acceptable_patientid_csv "$ACCEPTABLE_PATIENTID_CSV" \
-  --pre_quality_assessed "$PRE_QUALITY_ASSESSED"
+if [ ! -d "$RAW_SCANS_DIR" ]; then
+  echo "[ERROR] Raw scans dir does not exist: $RAW_SCANS_DIR" >&2
+  exit 1
+fi
 
-deactivate
-echo "[OK] P1 preprocessing completed successfully"
+shopt -s nullglob
+staged=0
+for src in "$RAW_SCANS_DIR"/*_ear.nii.gz; do
+  base=$(basename "$src" .nii.gz)         # e.g. CHUM-013_right_ear
+  dst="$STAGED_CT_DIR/${base}_0000.nii.gz" # e.g. CHUM-013_right_ear_0000.nii.gz
+  if [ ! -e "$dst" ]; then
+    ln -sf "$src" "$dst"
+  fi
+  staged=$((staged + 1))
+done
+shopt -u nullglob
+
+echo "Staged $staged ear scans."
+if [ "$staged" -eq 0 ]; then
+  echo "[ERROR] No *_ear.nii.gz files found in $RAW_SCANS_DIR" >&2
+  exit 1
+fi
 echo ""
 
-# ============================================================================== 
-# P2: Landmark Detection and Alignment
+# ==============================================================================
+# Heatmap Generation (uses landmark_env which has torch/nibabel/scipy)
 # ==============================================================================
 echo "=================================================="
-echo "STEP 2/4: Running P2 - Landmark Detection & Alignment"
+echo "STEP 2/3: Generating heatmaps"
 echo "=================================================="
-echo "Switching to landmark_env for P2-P4..."
 source "$LANDMARK_ENV/bin/activate"
 
-python "$PREPROCESSING_DIR/p2_preprocessing.py" \
-  --processed_scans_dir "$PROCESSED_SCANS_DIR" \
-  --output_dir "$OUTPUT_DIR" \
-  --landmark_model "$LANDMARK_MODEL" \
-  --no_eyes "$NO_EYES" \
-  --skip_alignment "$SKIP_ALIGNMENT"
+python "$PROJECT_ROOT/utils/heatmap_creation.py" \
+  --nii_dir "$STAGED_CT_DIR" \
+  --json_dir "$JSON_DIR" \
+  --heatmap_dir "$HEATMAP_DIR" \
+  --nnunet
 
-echo "[OK] P2 preprocessing completed successfully"
 echo ""
 
-# ============================================================================== 
-# P3: ROI Cropping Around Ear Landmarks
 # ==============================================================================
-echo "=================================================="
-echo "STEP 3/4: Running P3 - ROI Cropping"
-echo "=================================================="
-
-python "$PREPROCESSING_DIR/p3_preprocessing.py" \
-  --processed_scans_dir "$PROCESSED_SCANS_DIR" \
-  --output_dir "$OUTPUT_DIR" \
-  --excluded_scans_csv "$EXCLUDED_SCANS_CSV" \
-  --no_eyes "$NO_EYES" \
-  --skip_alignment "$SKIP_ALIGNMENT"
-
-echo "[OK] P3 preprocessing completed successfully"
-echo ""
-
-# ============================================================================== 
-# P4: Upsampling and Normalization for Inference
-# ==============================================================================
-echo "=================================================="
-echo "STEP 4/4: Running P4 - Upsampling & Normalization"
-echo "=================================================="
-
-python "$PREPROCESSING_DIR/p4_preprocessing.py" \
-  --processed_scans_dir "$PROCESSED_SCANS_DIR" \
-  --output_dir "$OUTPUT_DIR"
-
-echo "[OK] P4 preprocessing completed successfully"
-echo ""
-
-# ============================================================================== 
-# Heatmap Generation
-# ==============================================================================
-echo "Generating heatmaps..."
-python "$PROJECT_ROOT/utils/heatmap_creation.py" --nii_dir "$OUTPUT_DIR/Preprocessing/P4_Normalized_Ears" --json_dir "$JSON_DIR" --heatmap_dir "$HEATMAP_DIR" --nnunet
-
-# ============================================================================== 
 # Training
 # ==============================================================================
-echo "Starting training for $EPOCHS epochs..."
+echo "=================================================="
+echo "STEP 3/3: Training tissue/air model ($EPOCHS epochs)"
+echo "=================================================="
 python "$PROJECT_ROOT/model/train_tissue_air.py" \
-  --ct_dir "$OUTPUT_DIR/Preprocessing/P4_Normalized_Ears" \
+  --ct_dir "$STAGED_CT_DIR" \
   --seg_dir "$SEG_DIR" \
   --heatmap_dir "$HEATMAP_DIR" \
   --log_dir "$LOG_DIR" \

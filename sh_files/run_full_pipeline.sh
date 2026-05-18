@@ -1,4 +1,13 @@
 #!/bin/bash
+#$ -N FullPipeline_highres_3                     # Job name
+#$ -cwd                                # Run in current working directory
+#$ -l nvgpu=1                          # Request 1 NVIDIA GPU
+#$ -l gputype=rtx*                     # Request RTX series GPU
+#$ -l cores=8                         # Request 16 CPU cores
+#$ -l mem_free=64G                     # Request 64 GB of RAM
+#$ -o full_pipeline_highres_3.log                # Standard output log
+#$ -e full_pipeline_highres_3_err.log            # Standard error log
+#$ -dl 203501010000                    # Hard deadline by which the job must finish (GPU branch here).
 # ==============================================================================
 # Full Pipeline: Preprocessing -> Inference -> Postprocessing
 # ==============================================================================
@@ -6,7 +15,8 @@
 # All paths are configured here — no need to edit any Python files.
 #
 # Usage:
-#   ./sh_files/run_full_pipeline.sh
+#   Submit to cluster: qsub sh_files/run_full_pipeline.sh
+#   Run locally:       bash sh_files/run_full_pipeline.sh
 #
 # Pipeline steps:
 #   P1 (seg_env)      - Intensity clipping, segmentation, cropping, resampling
@@ -24,9 +34,9 @@
 # ==============================================================================
 
 # --- Directory paths ---
-RAW_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/tcia_noeyes/Raw"
-PROCESSED_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/tcia_noeyes/Processed-Data"
-OUTPUT_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/tcia_noeyes/Output"
+RAW_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/HighRes_retrain/Raw"
+PROCESSED_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/HighRes_retrain/Processed-Data"
+OUTPUT_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/HighRes_retrain/Output"
 
 # --- Processing options ---
 NO_EYES="True"              # Set to "True" if scans don't include eyes
@@ -48,11 +58,11 @@ EXCLUDED_SCANS_CSV="/projects/oticon/erhdata/Processed-Data/SBEO/High-quality-sc
 
 # --- Inference configuration ---
 # Directory containing trained model logs (each run has a best_model.pth inside)
-INFERENCE_LOGS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/Final_pipeline/Logs"
+INFERENCE_LOGS_DIR="/projects/oticon/erhdata/Processed-Data/SBEO/Retrain_Tissue_Air/Logs"
 
 # Which model run to use for postprocessing (the predictions from this run
 # will be passed to the postprocessing step)
-POSTPROCESSING_RUN="run_20260210_105409"
+POSTPROCESSING_RUN="run_20260507_125450"
 
 # --- nnU-Net configuration (for bone segmentation) ---
 NNUNET_RAW="/projects/oticon/erhdata/Processed-Data/AJIE/nnunet/nnUNet_raw"
@@ -64,9 +74,10 @@ NNUNET_DATASET_ID=1
 # DO NOT EDIT BELOW THIS LINE (unless you know what you're doing)
 # ==============================================================================
 
-# Get the directory where this script is located
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# Anchor to the repo root so paths work both locally and under qsub
+# (under SGE, BASH_SOURCE points to the spool copy of this script).
+PROJECT_ROOT="$HOME/Full-ear-canal-segmentation"
+cd "$PROJECT_ROOT"
 
 # Script locations
 PREPROCESSING_DIR="$PROJECT_ROOT/preprocessing"
