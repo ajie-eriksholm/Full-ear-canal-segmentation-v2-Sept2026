@@ -128,6 +128,19 @@ def build_result_to_original_voxel(pid, side, p1_log, p2_log, p3_log,
     # --- A5: padded 540 voxel -> resampled voxel (undo padding; pad was 0-before) ---
     A5 = np.eye(4)  # pad_width [before,after] has before=0 for all axes
 
+    # --- A5b: undo P1 Step 7 orientation flip (np.flip on the pre-pad grid). ---
+    # P1 flips the voxel data on the reversed axes but logs only a diagonal affine,
+    # so the flip must be inverted explicitly here or flipped scans land mirrored.
+    A5b = np.eye(4)
+    ori = get_step(p1_log, "orientation_standardization")
+    axes_flipped = (ori or {}).get("parameters", {}).get("axes_flipped", []) or []
+    if axes_flipped:
+        pad = get_step(p1_log, "padding")["parameters"]
+        pre_pad_dims = np.array(pad["original_dimensions"], dtype=float)  # shifted/resampled grid
+        for a in axes_flipped:
+            A5b[a, a] = -1.0
+            A5b[a, 3] = pre_pad_dims[a] - 1.0  # i' = (N-1) - i
+
     # --- A6: resampled voxel -> cropped voxel (share world; use file affines) ---
     resampled = find_nifti(os.path.join(processed_dir, f"{pid}_CT_resampled"))
     cropped = find_nifti(os.path.join(processed_dir, f"{pid}_CT_cropped"))
@@ -140,7 +153,7 @@ def build_result_to_original_voxel(pid, side, p1_log, p2_log, p3_log,
     # --- A7: cropped voxel -> original voxel (share world) ---
     A7 = np.linalg.inv(A_original) @ A_cropped
 
-    M = A7 @ A6 @ A5 @ A4 @ A3 @ A2 @ A1
+    M = A7 @ A6 @ A5b @ A5 @ A4 @ A3 @ A2 @ A1
     return M, A_original
 
 
