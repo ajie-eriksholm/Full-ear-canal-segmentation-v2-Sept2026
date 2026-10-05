@@ -1,12 +1,12 @@
 #!/bin/bash
-#$ -N FullPipeline_highres_HNSC                  # Job name
+#$ -N FullPipeline_highres_HECKTOR               # Job name
 #$ -cwd                                # Run in current working directory
 #$ -l nvgpu=1                          # Request 1 NVIDIA GPU
 #$ -l gputype=rtx*                     # Request RTX series GPU
 #$ -l cores=8                         # Request 16 CPU cores
 #$ -l mem_free=64G                     # Request 64 GB of RAM
-#$ -o full_pipeline_highres_HNSC.log             # Standard output log
-#$ -e full_pipeline_highres_HNSC_err.log         # Standard error log
+#$ -o full_pipeline_highres_HECKTOR.log          # Standard output log
+#$ -e full_pipeline_highres_HECKTOR_err.log      # Standard error log
 
 # ==============================================================================
 # Full Pipeline: Preprocessing -> Inference -> Postprocessing
@@ -23,11 +23,9 @@
 #   P2 (landmark_env) - Landmark detection and Frankfort plane alignment
 #   P3 (landmark_env) - ROI cropping around ear landmarks
 #   P4 (landmark_env) - Upsampling and normalization for inference
-#   Eardrum            - High-resolution eardrum crop (auxiliary track)
 #   Inference Tissue   - 3D U-Net tissue vs air segmentation and landmark prediction
 #   Inference Bone     - nnU-Net bone segmentation
 #   Postprocessing     - Markup JSONs, NIfTI masks, and STL generation
-#   Map to Original    - Maps results back onto the original scan grid
 #   Metric Extraction  - Centerline extraction and metric computation (vmtk)
 # ==============================================================================
 
@@ -36,9 +34,9 @@
 # ==============================================================================
 
 # --- Directory paths ---
-RAW_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/AJIE/Pre-processed_CT_annotations/HNSC/all_raw"
-PROCESSED_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/AJIE/Pre-processed_CT_annotations/HNSC/Processed-Data"
-OUTPUT_DIR="/projects/oticon/erhdata/Processed-Data/AJIE/Pre-processed_CT_annotations/HNSC/Output"
+RAW_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/AJIE/Pre-processed_CT_annotations/HECKTOR/all_raw"
+PROCESSED_SCANS_DIR="/projects/oticon/erhdata/Processed-Data/AJIE/Pre-processed_CT_annotations/HECKTOR/Processed-Data"
+OUTPUT_DIR="/projects/oticon/erhdata/Processed-Data/AJIE/Pre-processed_CT_annotations/HECKTOR/Output"
 
 # --- Processing options ---
 NO_EYES="True"              # Set to "True" if scans don't include eyes
@@ -376,7 +374,7 @@ echo "[OK] Tissue vs air inference completed successfully"
 echo ""
 
 # ==============================================================================
-# STEP 7: Bone Segmentation Inference (nnU-Net)
+# STEP 6: Bone Segmentation Inference (nnU-Net)
 # ==============================================================================
 echo "=================================================="
 echo "STEP 7/10: Running Bone Segmentation Inference - nnU-Net"
@@ -403,7 +401,7 @@ echo "[OK] Bone segmentation inference completed successfully"
 echo ""
 
 # ==============================================================================
-# STEP 8: Postprocessing
+# STEP 7: Postprocessing
 # ==============================================================================
 echo "=================================================="
 echo "STEP 8/10: Running Postprocessing"
@@ -439,19 +437,19 @@ echo "[OK] Postprocessing completed successfully"
 echo ""
 
 # ==============================================================================
-# STEP 9: Map results back to the original scan space
+# STEP 8: Map results back to the original scan space
 # ==============================================================================
 if [ "$MAP_TO_ORIGINAL" = "True" ]; then
 echo "=================================================="
 echo "STEP 9/10: Mapping results to original scan space"
 echo "=================================================="
-echo "Transform logs:   $TRANSFORM_LOGS_DIR"
+echo "Transform logs:   $OUTPUT_DIR/Logs/transform_logs"
 echo "Intermediates:    $PROCESSED_SCANS_DIR"
 echo "Output directory: $RESULTS_ORIGINAL_DIR"
 echo "=================================================="
 
 python "$MAP_BACK_SCRIPT" \
-    --logs_dir "$TRANSFORM_LOGS_DIR" \
+    --logs_dir "$OUTPUT_DIR/Logs/transform_logs" \
     --processed_dir "$PROCESSED_SCANS_DIR" \
     --masks_dir "$RESULTS_OUTPUT_DIR/masks" \
     --masks_bone_dir "$RESULTS_OUTPUT_DIR/masks_bone" \
@@ -477,7 +475,7 @@ echo ""
 fi
 
 # ==============================================================================
-# STEP 10: Metric Extraction (vmtk centerline + measurements)
+# STEP 9: Metric Extraction (vmtk centerline + measurements)
 # ==============================================================================
 echo "=================================================="
 echo "STEP 10/10: Running Metric Extraction"

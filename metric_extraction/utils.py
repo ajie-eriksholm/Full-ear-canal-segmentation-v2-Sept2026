@@ -312,61 +312,73 @@ def compute_voxel_mesh_volume(
     mesh_for_test = normals.GetOutput()
     
     # STEP 5: Voxel containment testing using stencil
-    if verbose:
-        print(f"  → Converting mesh to voxel stencil...")
-    
-    # Create image data (voxel grid)
-    voxel_grid = vtk.vtkImageData()
-    voxel_grid.SetDimensions(nx, ny, nz)
-    voxel_grid.SetSpacing(voxel_spacing, voxel_spacing, voxel_spacing)
-    voxel_grid.SetOrigin(voxel_bounds[0], voxel_bounds[2], voxel_bounds[4])
-    
     total_points = nx * ny * nz
-    
-    # Convert mesh to stencil
-    poly_to_stencil = vtk.vtkPolyDataToImageStencil()
-    poly_to_stencil.SetInputData(mesh_for_test)
-    poly_to_stencil.SetOutputOrigin(voxel_bounds[0], voxel_bounds[2], voxel_bounds[4])
-    poly_to_stencil.SetOutputSpacing(voxel_spacing, voxel_spacing, voxel_spacing)
-    poly_to_stencil.SetOutputWholeExtent(0, nx-1, 0, ny-1, 0, nz-1)
-    poly_to_stencil.Update()
-    
-    stencil_data = poly_to_stencil.GetOutput()
-    
-    # Create output image data to mark interior points
-    if verbose:
-        print(f"  → Computing interior voxels...")
-    
-    interior_image = vtk.vtkImageData()
-    interior_image.SetDimensions(nx, ny, nz)
-    interior_image.SetSpacing(voxel_spacing, voxel_spacing, voxel_spacing)
-    interior_image.SetOrigin(voxel_bounds[0], voxel_bounds[2], voxel_bounds[4])
-    
-    # Initialize with scalar data (all 255 = all white/interior)
-    scalars_array = np.full(total_points, 255, dtype=np.uint8)
-    scalars = numpy_support.numpy_to_vtk(scalars_array, deep=True)
-    scalars.SetNumberOfComponents(1)
-    interior_image.GetPointData().SetScalars(scalars)
-    
-    # Use stencil to mark exterior as 0, interior stays 255
-    stencil_filter = vtk.vtkImageStencil()
-    stencil_filter.SetInputData(interior_image)
-    stencil_filter.SetStencilData(stencil_data)
-    stencil_filter.SetBackgroundValue(0)  # Exterior = 0
-    stencil_filter.Update()
-    
-    output_image = stencil_filter.GetOutput()
-    
-    # Get the scalars and count interior voxels (255 = interior)
-    output_scalars = output_image.GetPointData().GetScalars()
-    inside_count = 0
-    if output_scalars:
-        for i in range(total_points):
-            if output_scalars.GetValue(i) > 128:  # > 128 means interior
-                inside_count += 1
-    
-    if verbose:
-        print(f"  ✓ Interior voxels: {inside_count:,} / {total_points:,}")
+
+    # Guard against pathologically large grids: an oversized/degenerate mesh
+    # (e.g. a reconstruction artifact) can produce grids of 10^8-10^9 voxels
+    # that make vtkPolyDataToImageStencil/vtkImageStencil crash with a native
+    # segfault (unrecoverable in Python) instead of raising an exception.
+    # Skip straight to the mesh-based fallback in that case.
+    MAX_VOXEL_COUNT = 20_000_000
+    if total_points > MAX_VOXEL_COUNT:
+        if verbose:
+            print(f"  ⚠ Grid too large ({total_points:,} voxels > {MAX_VOXEL_COUNT:,} limit) — "
+                  f"skipping voxel stencil to avoid a native crash")
+        inside_count = 0
+    else:
+        if verbose:
+            print(f"  → Converting mesh to voxel stencil...")
+
+        # Create image data (voxel grid)
+        voxel_grid = vtk.vtkImageData()
+        voxel_grid.SetDimensions(nx, ny, nz)
+        voxel_grid.SetSpacing(voxel_spacing, voxel_spacing, voxel_spacing)
+        voxel_grid.SetOrigin(voxel_bounds[0], voxel_bounds[2], voxel_bounds[4])
+
+        # Convert mesh to stencil
+        poly_to_stencil = vtk.vtkPolyDataToImageStencil()
+        poly_to_stencil.SetInputData(mesh_for_test)
+        poly_to_stencil.SetOutputOrigin(voxel_bounds[0], voxel_bounds[2], voxel_bounds[4])
+        poly_to_stencil.SetOutputSpacing(voxel_spacing, voxel_spacing, voxel_spacing)
+        poly_to_stencil.SetOutputWholeExtent(0, nx-1, 0, ny-1, 0, nz-1)
+        poly_to_stencil.Update()
+
+        stencil_data = poly_to_stencil.GetOutput()
+
+        # Create output image data to mark interior points
+        if verbose:
+            print(f"  → Computing interior voxels...")
+
+        interior_image = vtk.vtkImageData()
+        interior_image.SetDimensions(nx, ny, nz)
+        interior_image.SetSpacing(voxel_spacing, voxel_spacing, voxel_spacing)
+        interior_image.SetOrigin(voxel_bounds[0], voxel_bounds[2], voxel_bounds[4])
+
+        # Initialize with scalar data (all 255 = all white/interior)
+        scalars_array = np.full(total_points, 255, dtype=np.uint8)
+        scalars = numpy_support.numpy_to_vtk(scalars_array, deep=True)
+        scalars.SetNumberOfComponents(1)
+        interior_image.GetPointData().SetScalars(scalars)
+
+        # Use stencil to mark exterior as 0, interior stays 255
+        stencil_filter = vtk.vtkImageStencil()
+        stencil_filter.SetInputData(interior_image)
+        stencil_filter.SetStencilData(stencil_data)
+        stencil_filter.SetBackgroundValue(0)  # Exterior = 0
+        stencil_filter.Update()
+
+        output_image = stencil_filter.GetOutput()
+
+        # Get the scalars and count interior voxels (255 = interior)
+        output_scalars = output_image.GetPointData().GetScalars()
+        inside_count = 0
+        if output_scalars:
+            for i in range(total_points):
+                if output_scalars.GetValue(i) > 128:  # > 128 means interior
+                    inside_count += 1
+
+        if verbose:
+            print(f"  ✓ Interior voxels: {inside_count:,} / {total_points:,}")
     
     # Calculate volume
     if inside_count == 0:

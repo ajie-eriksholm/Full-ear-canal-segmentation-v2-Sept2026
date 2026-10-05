@@ -35,7 +35,11 @@ LANDMARK_ENV="$PROJECT_ROOT/landmark_env"
 
 # Metric environment (conda)
 METRIC_ENV_NAME="metric_env"
-METRIC_PYTHON_VERSION="3.11"
+# NOTE: conda-forge's vmtk 1.5.0 py311 build (py311hdced90c_14) ships broken
+# Python bindings (vtkvmtk classes don't inherit vtkAlgorithm, so SetInputData
+# etc. are missing). Python 3.10 builds work correctly - do not bump this
+# without verifying `vtkvmtk.vtkvmtkPolyDataCenterlines().SetInputData` exists.
+METRIC_PYTHON_VERSION="3.10"
 
 # Requirement files (in env_req/ folder)
 SEG_REQ="$PROJECT_ROOT/env_req/seg_env_req.txt"
@@ -292,8 +296,16 @@ if [ "$SKIP_METRIC_ENV" != true ]; then
     eval "$(conda shell.bash hook)"
     conda activate "$METRIC_ENV_NAME"
 
+    # The vmtk conda package ships its own private vtk 9.2.6 build (registered
+    # with distutils-style egg-info, which pip cannot cleanly uninstall/upgrade).
+    # Remove that stale egg-info so pip's dependency resolution doesn't choke,
+    # but otherwise leave this bundled vtk alone - it's the one vmtk needs.
+    print_info "Cleaning up stale VTK egg-info metadata..."
+    SITE_PKGS="$CONDA_PREFIX/lib/python$METRIC_PYTHON_VERSION/site-packages"
+    rm -rf "$SITE_PKGS"/vtk-*.egg-info
+
     print_info "Installing pip requirements from: $METRIC_REQ"
-    pip install -r "$METRIC_REQ"
+    pip install --no-cache-dir -r "$METRIC_REQ"
 
     if [ $? -eq 0 ]; then
         print_success "metric_env pip requirements installed successfully"
@@ -302,28 +314,50 @@ if [ "$SKIP_METRIC_ENV" != true ]; then
         exit 1
     fi
 
+    # Install pyvista WITHOUT letting pip drag in its own vtk dependency.
+    # pyvista>=0.45 requires vtk>=9.3.1, but vmtk needs the bundled vtk 9.2.6 -
+    # installing a newer vtk via pip breaks vmtk's compiled Python bindings.
+    print_info "Installing pyvista (pinned, --no-deps to preserve vmtk's vtk 9.2.6)..."
+    pip install --no-cache-dir --no-deps "pyvista==0.44.2" pyvista-validation cyclopts rich-rst matplotlib pooch scooby "typing_extensions>=4.10"
+
+    print_info "Verifying pyvista installation..."
+    python -c "import pyvista; print('  pyvista version:', pyvista.__version__)"
+    if [ $? -ne 0 ]; then
+        print_error "Failed to install a working pyvista against vmtk's vtk 9.2.6"
+        exit 1
+    fi
+
     # Fix ITK version symlinks for vmtk compatibility
     # vmtk was built against ITK 5.3 but conda-forge provides ITK 5.4
     print_info "Fixing ITK version symlinks for vmtk compatibility..."
-    cd "$CONDA_PREFIX/lib"
-    for f in *-5.4.so.1; do
-        link="${f/-5.4.so.1/-5.3.so.1}"
-        [ ! -e "$link" ] && ln -s "$f" "$link"
-    done
-    for f in *-5.4.so; do
-        link="${f/-5.4.so/-5.3.so}"
-        [ ! -e "$link" ] && ln -s "$f" "$link"
-    done
-    cd "$PROJECT_ROOT"
-    print_success "ITK symlinks created"
+    if [ -d "$CONDA_PREFIX/lib" ]; then
+        cd "$CONDA_PREFIX/lib"
+        for f in *-5.4.so.1; do
+            [ -e "$f" ] && link="${f/-5.4.so.1/-5.3.so.1}" && [ ! -e "$link" ] && ln -s "$f" "$link"
+        done
+        for f in *-5.4.so; do
+            [ -e "$f" ] && link="${f/-5.4.so/-5.3.so}" && [ ! -e "$link" ] && ln -s "$f" "$link"
+        done
+        cd "$PROJECT_ROOT"
+        print_success "ITK symlinks created"
+    fi
 
-    # Verify imports
+    # Verify imports with detailed error reporting
     print_info "Verifying metric_env imports..."
-    python -c "from vmtk import vmtkscripts; print('  vmtk OK')" && \
-    python -c "import SimpleITK; print('  SimpleITK OK')" && \
-    python -c "import pyvista; print('  pyvista OK')" && \
-    print_success "metric_env verification passed" || \
-    print_warning "Some metric_env imports failed - check the environment"
+    IMPORT_ERRORS=0
+    
+    python -c "from vmtk import vmtkscripts; print('  vmtk OK')" || { print_warning "vmtk import failed"; IMPORT_ERRORS=$((IMPORT_ERRORS+1)); }
+    python -c "from vmtk import vtkvmtk; f = vtkvmtk.vtkvmtkPolyDataCenterlines(); assert hasattr(f, 'SetInputData'), 'vmtk Python bindings are broken (missing SetInputData) - wrong python/vtk version pairing'; print('  vmtk centerline bindings OK')" || { print_warning "vmtk centerline bindings check failed"; IMPORT_ERRORS=$((IMPORT_ERRORS+1)); }
+    python -c "import SimpleITK; print('  SimpleITK OK')" || { print_warning "SimpleITK import failed"; IMPORT_ERRORS=$((IMPORT_ERRORS+1)); }
+    python -c "import pyvista; print('  pyvista OK')" || { print_warning "pyvista import failed"; IMPORT_ERRORS=$((IMPORT_ERRORS+1)); }
+    python -c "import pandas; print('  pandas OK')" || { print_warning "pandas import failed"; IMPORT_ERRORS=$((IMPORT_ERRORS+1)); }
+    
+    if [ $IMPORT_ERRORS -eq 0 ]; then
+        print_success "metric_env verification passed - all imports OK"
+    else
+        print_warning "Some metric_env imports failed - check the environment"
+        print_info "Attempted workarounds: VTK cleanup, pyvista install via conda, ITK symlinks"
+    fi
 
     conda deactivate
 else

@@ -19,11 +19,26 @@ masks_dir = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Inference_results
 output_dir_markups = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/markups"
 output_dir_markups_no_fh = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/markups"
 output_dir_masks = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/masks"
+
+# 3D Slicer fiducial markups (.mrk.json) export (optional). When enabled, the
+# landmarks are also written in the native 3D Slicer markups schema so they can
+# be loaded directly in Slicer. Defaults to the markups directory when empty.
+export_slicer_markups = False
+output_dir_slicer_markups = ""
 output_dir_stl = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/stl"
 
 bone_masks_dir = ""  # Directory with nnU-Net bone predictions (optional)
 output_dir_masks_bone = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/masks_bone"
 output_dir_stl_bone = "/projects/oticon/erhdata/Processed-Data/SBEO/tcia/Output/Results/stl_bone"
+
+# P4 normalized inputs (_0000) shared by both models as the reference grid.
+# When empty, the tissue masks in masks_dir are used as the reference instead.
+reference_grid_dir = ""
+
+# Coordinate system for exported STL vertices and markup positions.
+# nibabel affines give RAS; 3D Slicer reads STL models and markup JSONs as LPS,
+# so "LPS" (negate x,y) makes STL, markups and the NIfTI masks overlay in Slicer.
+output_coordinate_system = "LPS"
 
 # Label mapping for landmarks 1-7 (from predicted_landmark_coordinates.csv)
 CANAL_LABELS = {
@@ -73,6 +88,75 @@ def list_nifti_files(directory):
     return sorted(f for f in os.listdir(directory) if f.endswith(NIFTI_EXTENSIONS))
 
 
+def to_output_coords(points):
+    """Map RAS world coords (nibabel affine output) to the export convention.
+
+    With output_coordinate_system == "LPS" this negates x and y, so exported STL
+    and markups overlay the NIfTI masks in 3D Slicer for any input affine
+    convention (x,y,z or -x,-y,z). "RAS" leaves coordinates unchanged.
+    """
+    pts = np.asarray(points, dtype=float)
+    if output_coordinate_system.upper() == "LPS":
+        pts = pts.copy()
+        pts[..., 0] *= -1
+        pts[..., 1] *= -1
+    return pts
+
+
+def parse_patient_side(filename):
+    """Return (patient, ear_side) from a bone prediction filename, else (None, None)."""
+    base = strip_nifti_extension(filename)
+    if base.endswith("_0000"):
+        base = base[:-len("_0000")]
+    parts = base.rsplit("_", 1)
+    if len(parts) == 2 and parts[1] in ("left", "right"):
+        return parts[0], parts[1]
+    return None, None
+
+
+def find_reference_grid_image(patient, ear_side):
+    """Locate an image on the shared grid (correct affine) for this ear.
+
+    Prefers the P4 normalized input (reference_grid_dir), then falls back to the
+    tissue prediction in masks_dir, which already carries the correct affine.
+    """
+    search = []
+    if reference_grid_dir and os.path.isdir(reference_grid_dir):
+        search += [(reference_grid_dir, suffix) for suffix in ("_0000", "")]
+    if masks_dir and os.path.isdir(masks_dir):
+        search.append((masks_dir, "_pred_seg"))
+    for directory, suffix in search:
+        for ext in NIFTI_EXTENSIONS:
+            candidate = os.path.join(directory, f"{patient}_{ear_side}{suffix}{ext}")
+            if os.path.exists(candidate):
+                return candidate
+    return None
+
+
+def load_bone_prediction(bone_path, patient, ear_side):
+    """Load an nnU-Net bone prediction in the shared tissue/P4 reference space.
+
+    nnU-Net writes via SimpleITK (LPS), flipping the x/y sform sign relative to
+    the nibabel-written tissue masks, so the two would otherwise be mirrored in
+    world space. The prediction is voxel-index aligned with the P4 input, so we
+    re-stamp the reference affine/header (no interpolation, no data flip). This
+    keeps masks, STL and landmarks aligned for any input convention (x,y,z or
+    -x,-y,z).
+    """
+    nii = nib.load(bone_path)
+    ref_path = find_reference_grid_image(patient, ear_side)
+    if ref_path is None:
+        return nii
+    ref = nib.load(ref_path)
+    if ref.shape != nii.shape:
+        print(f"  Warning: reference shape {ref.shape} != bone shape {nii.shape} "
+              f"for {patient}_{ear_side}; keeping original affine")
+        return nii
+    if not np.allclose(nii.affine, ref.affine, atol=1e-4):
+        print(f"  Aligning bone mask to reference grid for {patient}_{ear_side}")
+    return nib.Nifti1Image(np.asanyarray(nii.dataobj), ref.affine, ref.header)
+
+
 def get_pred_seg_base_name(filename):
     """Return base scan name for <name>_pred_seg.nii[.gz], else None."""
     stem = strip_nifti_extension(filename)
@@ -107,19 +191,20 @@ def nifti_mask_to_block_stl(binary_mask, affine, output_stl_path):
     """Convert a binary 3D mask into a solid block STL using pyvista.
 
     Steps:
-      1. Build a pyvista ImageData (voxel grid) from the binary array.
+      1. Build a pyvista ImageData (voxel grid) in index space from the array.
       2. Threshold to keep only foreground voxels -> solid block geometry.
       3. Extract the outer surface of those voxels (blocky).
-      4. Apply VTK smoothing (Windowed Sinc + Laplacian) for refinement.
-      5. Save as STL in world coordinates.
+      4. Map voxel indices to world mm with the full affine (keeps direction
+         sign, so this matches the marching-cubes tissue STL for any convention).
+      5. Apply VTK smoothing (Windowed Sinc + Laplacian) for refinement.
+      6. Save as STL in world coordinates.
     """
-    # Spacing from affine column norms; origin from translation
-    spacing = np.sqrt((affine[:3, :3] ** 2).sum(axis=0)).astype(float)
-
+    # Build in index space (unit spacing, zero origin); the signed affine is
+    # applied to the surface vertices below so -x,-y,z inputs are not mirrored.
     grid = pv.ImageData()
     grid.dimensions = np.array(binary_mask.shape) + 1  # cell-based: N+1 points per axis
-    grid.spacing = spacing
-    grid.origin = affine[:3, 3]
+    grid.spacing = (1.0, 1.0, 1.0)
+    grid.origin = (0.0, 0.0, 0.0)
     grid.cell_data["mask"] = binary_mask.flatten(order="F").astype(float)
 
     # Threshold -> solid block cells
@@ -130,6 +215,11 @@ def nifti_mask_to_block_stl(binary_mask, affine, output_stl_path):
 
     # Extract outer surface of the voxel block
     surface = block.extract_surface()
+
+    # Voxel index -> world mm using the full (signed) affine, then export coords
+    pts = np.asarray(surface.points)
+    pts_h = np.hstack([pts, np.ones((len(pts), 1))])
+    surface.points = to_output_coords((affine @ pts_h.T).T[:, :3])
 
     # Windowed Sinc smoothing (high quality, aggressive)
     sinc_smooth = _vtk.vtkWindowedSincPolyDataFilter()
@@ -171,22 +261,15 @@ def extract_bone_landmarks(bone_masks_directory):
 
     nii_files = list_nifti_files(bone_masks_directory)
     for fname in nii_files:
-        nii = nib.load(os.path.join(bone_masks_directory, fname))
-        data = nii.get_fdata().astype(np.int16)
-        affine = nii.affine
-
         # Parse patient and ear_side from filename (e.g. "patient_left.nii.gz")
-        base = strip_nifti_extension(fname)
-        # Handle nnU-Net output names which may or may not have _0000
-        if base.endswith("_0000"):
-            base = base[:-5]
-        parts = base.rsplit("_", 1)
-        if len(parts) == 2 and parts[1] in ("left", "right"):
-            patient, side = parts
-            ear_side = side  # match tissue CSV key format
-        else:
+        patient, ear_side = parse_patient_side(fname)
+        if patient is None:
             print(f"  Warning: cannot parse patient/side from bone file: {fname}, skipping landmarks")
             continue
+
+        nii = load_bone_prediction(os.path.join(bone_masks_directory, fname), patient, ear_side)
+        data = np.asanyarray(nii.dataobj).astype(np.int16)
+        affine = nii.affine
 
         lm_list = []
         for lbl, (out_id, label) in BONE_LANDMARK_LABELS.items():
@@ -225,8 +308,14 @@ def process_bone_masks():
 
     processed = 0
     for fname in nii_files:
-        nii = nib.load(os.path.join(bone_masks_dir, fname))
-        data = nii.get_fdata().astype(np.int16)
+        patient, ear_side = parse_patient_side(fname)
+        if patient is None:
+            print(f"  Warning: cannot parse patient/side from bone file: {fname}, skipping.")
+            continue
+        base = f"{patient}_{ear_side}"
+
+        nii = load_bone_prediction(os.path.join(bone_masks_dir, fname), patient, ear_side)
+        data = np.asanyarray(nii.dataobj).astype(np.int16)
 
         # Merge skull (1) + mandible (2) into binary bone mask
         bone_binary = np.isin(data, BONE_SEG_LABELS).astype(np.uint8)
@@ -234,11 +323,6 @@ def process_bone_masks():
         if bone_binary.sum() == 0:
             print(f"  Warning: no bone voxels in {fname}, skipping.")
             continue
-
-        # Clean base name (strip _0000 if present)
-        base = strip_nifti_extension(fname)
-        if base.endswith("_0000"):
-            base = base[:-5]
 
         # Save NIfTI mask (keep all components for bone)
         bone_nii = nib.Nifti1Image(bone_binary, nii.affine, nii.header)
@@ -306,13 +390,48 @@ def process_masks():
             continue
 
         verts_h = np.hstack([verts_vox, np.ones((len(verts_vox), 1))])
-        verts_mm = (nii.affine @ verts_h.T).T[:, :3]
+        verts_mm = to_output_coords((nii.affine @ verts_h.T).T[:, :3])
         save_stl_binary(verts_mm, faces_mc, os.path.join(output_dir_stl, f"{base_name}.stl"))
 
         processed += 1
         print(f"  Processed mask: {base_name}")
 
     print(f"Processed {processed} masks -> NIfTI: '{output_dir_masks}', STL: '{output_dir_stl}'")
+
+
+def write_slicer_markups(landmarks, coordinate_system, filepath):
+    """Write landmarks as a 3D Slicer fiducial markups (.mrk.json) file."""
+    control_points = []
+    for lm in landmarks:
+        position = lm.get("position")
+        if position is None:
+            continue
+        control_points.append({
+            "id": str(lm["id"]),
+            "label": lm["label"],
+            "description": "",
+            "associatedNodeID": "",
+            "position": [float(position[0]), float(position[1]), float(position[2])],
+            "orientation": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            "selected": True,
+            "locked": False,
+            "visibility": True,
+            "positionStatus": "defined",
+        })
+    markups_json = {
+        "@schema": "https://raw.githubusercontent.com/Slicer/Slicer/main/Modules/Loadable/Markups/Resources/Schema/markups-schema-v1.0.3.json#",
+        "markups": [
+            {
+                "type": "Fiducial",
+                "coordinateSystem": coordinate_system.upper(),
+                "coordinateUnits": "mm",
+                "locked": False,
+                "controlPoints": control_points,
+            }
+        ],
+    }
+    with open(filepath, "w") as f:
+        json.dump(markups_json, f, indent=2)
 
 
 def main():
@@ -323,6 +442,12 @@ def main():
         print(f"WARNING: FH plane landmarks CSV not found: {FH_plane_lm}")
         print(f"Markups will be saved (canal landmarks only) to: {active_markups_dir}")
     os.makedirs(active_markups_dir, exist_ok=True)
+
+    slicer_markups_dir = None
+    if export_slicer_markups:
+        slicer_markups_dir = output_dir_slicer_markups or active_markups_dir
+        os.makedirs(slicer_markups_dir, exist_ok=True)
+        print(f"3D Slicer markups (.mrk.json) will be saved to: {slicer_markups_dir}")
 
     # --- Load predicted canal landmarks (1-7) ---
     pred_df = pd.read_csv(predicted_landmarks)
@@ -397,7 +522,13 @@ def main():
         # Sort by numeric id
         landmarks.sort(key=lambda lm: int(lm["id"]))
 
+        # Export positions in the chosen convention (RAS -> LPS for Slicer)
+        for lm in landmarks:
+            if lm.get("position") is not None:
+                lm["position"] = to_output_coords(lm["position"]).tolist()
+
         markup = {
+            "coordinateSystem": output_coordinate_system.upper(),
             "landmarks": landmarks,
             "count": len(landmarks)
         }
@@ -408,9 +539,15 @@ def main():
         with open(json_path, "w") as f:
             json.dump(markup, f, indent=2)
 
+        if slicer_markups_dir is not None:
+            slicer_path = os.path.join(slicer_markups_dir, f"{patient}_{ear_side}.mrk.json")
+            write_slicer_markups(landmarks, output_coordinate_system, slicer_path)
+
         processed.add((patient, ear_side))
 
     print(f"Created {len(processed)} markup JSON files in: {active_markups_dir}")
+    if slicer_markups_dir is not None:
+        print(f"Created {len(processed)} 3D Slicer markup files in: {slicer_markups_dir}")
 
     process_masks()
     process_bone_masks()
@@ -442,6 +579,16 @@ def parse_arguments():
                         help='Output directory for bone NIfTI masks')
     parser.add_argument('--output_dir_stl_bone', type=str, default=None,
                         help='Output directory for bone STL files')
+    parser.add_argument('--reference_grid_dir', type=str, default=None,
+                        help='Directory with P4 normalized inputs (_0000) used as the shared '
+                             'grid to align bone masks to tissue space (defaults to masks_dir)')
+    parser.add_argument('--coordinate_system', type=str, default=None, choices=['LPS', 'RAS'],
+                        help='Coordinate system for exported STL and markups (default: LPS, '
+                             'so they overlay the NIfTI masks in 3D Slicer)')
+    parser.add_argument('--export_slicer_markups', type=str, default=None, choices=['True', 'False'],
+                        help='If True, also export landmarks as 3D Slicer fiducial markups (.mrk.json)')
+    parser.add_argument('--output_dir_slicer_markups', type=str, default=None,
+                        help='Output directory for 3D Slicer markups (defaults to the markups directory)')
     return parser.parse_args()
 
 
@@ -467,4 +614,12 @@ if __name__ == "__main__":
         output_dir_masks_bone = args.output_dir_masks_bone
     if args.output_dir_stl_bone is not None:
         output_dir_stl_bone = args.output_dir_stl_bone
+    if args.reference_grid_dir is not None:
+        reference_grid_dir = args.reference_grid_dir
+    if args.coordinate_system is not None:
+        output_coordinate_system = args.coordinate_system
+    if args.export_slicer_markups is not None:
+        export_slicer_markups = args.export_slicer_markups == 'True'
+    if args.output_dir_slicer_markups is not None:
+        output_dir_slicer_markups = args.output_dir_slicer_markups
     main()

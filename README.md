@@ -17,9 +17,11 @@
     - [P2: Landmark Detection & Alignment](#p2-landmark-detection--alignment-p2_preprocessingpy)
     - [P3: Ear ROI Cropping](#p3-ear-roi-cropping-p3_preprocessingpy)
     - [P4: Upsampling & Normalization](#p4-upsampling--normalization-p4_preprocessingpy)
+  - [Eardrum Preprocessing](#eardrum-preprocessing-auxiliary-track)
   - [Inference](#inference-modeltest_tissue_airpy)
   - [Bone Segmentation Inference](#bone-segmentation-inference-modeltest_bonepy)
   - [Postprocessing](#postprocessing-postprocessinggenerate_resultspy)
+  - [Map to Original Space](#map-to-original-space-postprocessingmap_results_to_originalpy)
   - [Metric Extraction](#metric-extraction-metric_extractionpipelinepy)
 - [Bend Artifact Removal (Optional)](#bend-artifact-removal-optional-postprocessingbend_artifact_removalpy)
 - [Retraining Scripts](#retraining-scripts)
@@ -27,6 +29,7 @@
   - [Retraining Tissue vs Air Segmentation and Landmark Placement](#retraining-tissue-vs-air-segmentation-and-landmark-placement)
 - [Webpage Feature Preparation](#webpage-feature-preparation-webpage_features_setupall_features_extractionpy)
 - [References](#references)
+- [Changes from Previous Version](#changes-from-previous-version)
 
 ---
 
@@ -34,13 +37,15 @@
 
 This repository contains a complete end-to-end pipeline for **ear canal segmentation** and **anatomical landmark detection** from CT scans. Starting from raw NIfTI CT scans of the head, it produces 3D surface meshes (STL) of the ear canal along with anatomical landmark coordinates.
 
-The pipeline consists of five main stages:
+The pipeline consists of seven main stages:
 
 1. **Preprocessing (P1-P4)** — Transforms raw CT scans into ear-cropped, orientation-standardized, normalized sub-volumes ready for inference.
-2. **Tissue vs Air Inference** — Applies trained 3D U-Net models with dual task-specific heads to simultaneously predict ear canal segmentations (tissue vs air) and anatomical landmarks.
-3. **Bone Segmentation Inference** — Applies a trained nnU-Net model to predict bone structures (skull, mandible) and additional landmarks.
-4. **Postprocessing** — Combines predictions into visualization-ready outputs: JSON markup files (compatible with 3D Slicer), NIfTI segmentation masks, and STL surface meshes.
-5. **Metric Extraction** — Computes ear canal centerlines (via vmtk) and anatomical measurements (lengths, diameters, cross-sections, angles) from the segmentation results.
+2. **Eardrum Preprocessing** — Auxiliary track: crops high-resolution volumes around the eardrum region for detailed eardrum analysis.
+3. **Tissue vs Air Inference** — Applies trained 3D U-Net models with dual task-specific heads to simultaneously predict ear canal segmentations (tissue vs air) and anatomical landmarks.
+4. **Bone Segmentation Inference** — Applies a trained nnU-Net model to predict bone structures (skull, mandible) and additional landmarks.
+5. **Postprocessing** — Combines predictions into visualization-ready outputs: JSON markup files (compatible with 3D Slicer), NIfTI segmentation masks, and STL surface meshes.
+6. **Map to Original Space** — Maps the results (masks, STL, markups) from the ear-local processing space back onto the original scan grid using the P1/P2/P3 transform logs.
+7. **Metric Extraction** — Computes ear canal centerlines (via vmtk) and anatomical measurements (lengths, diameters, cross-sections, angles) from the segmentation results.
 
 ### Input Requirements
 
@@ -84,6 +89,7 @@ Both scripts will:
 - Install all required packages from `env_req/seg_env_req.txt`, `env_req/landmark_env_req.txt`, and `env_req/metric_env_req.txt`
 - Fix ITK version symlinks for vmtk compatibility
 - Handle any existing environments (asks before overwriting)
+- Automatically resolve common VTK/pyvista conflicts if they occur
 
 #### Troubleshooting: Permission Denied
 
@@ -117,9 +123,16 @@ pip install -r env_req/landmark_env_req.txt
 deactivate
 
 # Create metric_env for metric extraction (requires conda)
-conda create -n metric_env -c conda-forge --override-channels python=3.11 vmtk -y
+# NOTE: use python=3.10 - the conda-forge vmtk 1.5.0 build for python 3.11
+# (py311hdced90c_14) ships broken Python bindings (vtkvmtk classes don't
+# inherit vtkAlgorithm, so SetInputData/GetOutput are missing at runtime).
+conda create -n metric_env -c conda-forge --override-channels python=3.10 vmtk -y
 conda activate metric_env
 pip install -r env_req/metric_env_req.txt
+# Install pyvista separately, pinned + --no-deps, so pip doesn't pull in a
+# newer vtk (pyvista>=0.45 requires vtk>=9.3.1, but vmtk needs the bundled
+# vtk 9.2.6 - a pip-installed vtk breaks vmtk's compiled Python bindings).
+pip install --no-deps "pyvista==0.44.2" pyvista-validation cyclopts rich-rst matplotlib pooch scooby "typing_extensions>=4.10"
 # Fix ITK symlinks (vmtk built against ITK 5.3, conda provides 5.4)
 cd "$CONDA_PREFIX/lib"
 for f in *-5.4.so.1; do link="${f/-5.4.so.1/-5.3.so.1}"; [ ! -e "$link" ] && ln -s "$f" "$link"; done
@@ -150,10 +163,13 @@ OUTPUT_DIR="/path/to/output"
 # Processing options
 NO_EYES="False"              # Set to "True" if scans don't include eyes
 SKIP_ALIGNMENT="False"       # Set to "True" to skip alignment step
+MAP_TO_ORIGINAL="True"       # Set to "False" to skip mapping results back to original space
+EXPORT_SLICER_MARKUPS="True" # Set to "True" to export landmarks as 3D Slicer markups
 
 # Python environments
 SEG_ENV="/path/to/seg_env"
 LANDMARK_ENV="/path/to/landmark_env"
+METRIC_ENV="/path/to/metric_env"    # Conda environment for metric extraction (vmtk)
 
 # Models
 LANDMARK_MODEL="/path/to/landmark_model.pth"
@@ -166,7 +182,7 @@ PRE_QUALITY_ASSESSED="False"
 EXCLUDED_SCANS_CSV="/path/to/excluded_scans.csv"
 ```
 
-The script runs all 8 steps automatically (**P1 → P2 → P3 → P4 → Tissue/Air Inference → Bone Inference → Postprocessing → Metric Extraction**), activates the correct environment for each step, and stops with a clear error if any step fails.
+The script runs all 10 steps automatically (**P1 → P2 → P3 → P4 → Eardrum Preprocessing → Tissue/Air Inference → Bone Inference → Postprocessing → Map to Original Space → Metric Extraction**), activates the correct environment for each step, and stops with a clear error if any step fails.
 
 ### Configuration Options
 
@@ -174,6 +190,8 @@ The script runs all 8 steps automatically (**P1 → P2 → P3 → P4 → Tissue/
 |---|---|---|
 | `NO_EYES` | `"False"` | Set to `"True"` if scans don't include eye structures. Uses mandible top points instead of eye landmarks for Frankfort plane fitting. Must be consistent across P2 and P3. |
 | `SKIP_ALIGNMENT` | `"False"` | Set to `"True"` to skip Frankfort plane alignment. Only performs landmark detection without rotation. Must be consistent across P2 and P3. |
+| `MAP_TO_ORIGINAL` | `"True"` | Set to `"False"` to skip mapping results back to the original scan space. When `"True"`, step 9 resamples masks, STL meshes, and landmarks onto the original CT grid. |
+| `EXPORT_SLICER_MARKUPS` | `"True"` | Set to `"True"` to also export landmarks as 3D Slicer-compatible markup files (`.mrk.json`). Useful for clinical visualization and validation. |
 | `PRE_QUALITY_ASSESSED` | `"False"` | Set to `"True"` to only process scans listed in `ACCEPTABLE_PATIENTID_CSV`. |
 | `POSTPROCESSING_RUN` | — | The model run name to use for inference and postprocessing (e.g., `"run_20260210_105409"`). |
 
@@ -224,6 +242,13 @@ OUTPUT_DIR/
 │   └── stl_bone/                              # Bone STL surface meshes
 │       └── {patient_id}_{ear_side}.stl
 │
+├── Results_original_space/                    # Results mapped back onto the original scan grid
+│   ├── markups/                               # Landmark JSONs in original scan coordinates
+│   ├── masks/                                 # Tissue masks resampled to the original CT grid
+│   ├── stl/                                   # Tissue STL meshes in original scan coordinates
+│   ├── masks_bone/                            # Bone masks resampled to the original CT grid
+│   └── stl_bone/                              # Bone STL meshes in original scan coordinates
+│
 ├── Metrics/                                   # Metric extraction outputs
 │   ├── processing_results.csv                 # All measurements aggregated
 │   ├── markups/                               # Updated landmark JSONs
@@ -272,7 +297,18 @@ PROCESSED_SCANS_DIR/
     ├── {patient_id}_left_ear_cropped_mirrored.nii.gz
     ├── {patient_id}_left_ear_cropped_mirrored_origin_reset.nii.gz
     └── {patient_id}_right_ear_cropped_origin_reset.nii.gz
+
+Processed_eardrum/                                # Eardrum-centered high-resolution crops (auxiliary track)
+└── {patient_id}/
+    ├── {patient_id}_right_ear_raw_hu.nii.gz    # Right ear crop, raw Hounsfield units
+    ├── {patient_id}_right_ear_0000.nii.gz      # Right ear crop, normalized to [0, 1]
+    ├── {patient_id}_left_ear_raw_hu.nii.gz     # Left ear crop, raw HU (mirrored)
+    ├── {patient_id}_left_ear_0000.nii.gz       # Left ear crop, normalized (mirrored)
+    ├── {patient_id}_transform_log.json         # Full record of this script's processing steps
+    └── visualizations/                         # Optional QA screenshots
 ```
+
+The eardrum preprocessing step is an optional auxiliary track and does not affect the main pipeline results. If it fails, the pipeline continues. See [Eardrum Crop Extraction (Detailed)](#eardrum-crop-extraction-detailed) for exactly how these files are produced.
 
 ---
 
@@ -410,6 +446,49 @@ Prepares ear volumes for model inference by resampling and normalizing.
 **Output:**
 - `{PatientID}_left_0000.nii.gz`, `{PatientID}_right_0000.nii.gz` in `Output/Preprocessing/P4_Normalized_Ears/`
 - Uses nnU-Net `_0000` naming convention so both tissue/air and bone inference read from the same folder
+
+---
+
+### Eardrum Preprocessing (Auxiliary Track)
+
+**Environment:** `landmark_env`  
+**Script:** `pre-processing-eardrum.py` (located in parent directory)
+
+Optional auxiliary preprocessing step that crops high-resolution volumes centered around the eardrum region for detailed eardrum analysis. Runs independently alongside the main inference pipeline and does not affect the final segmentation/landmark results. It duplicates and adapts the logic of P1–P4 rather than chaining them, so it can output a much higher-resolution crop.
+
+#### Why a separate script instead of reusing P1–P4
+
+P1–P4 downsample every scan onto a coarse ~1.05 mm / 256³ grid very early, because the trained landmark/segmentation models expect that exact scale, then crop a 90³-voxel ear ROI from that coarse grid. That resolution is too low to resolve fine eardrum structures. `pre-processing-eardrum.py` keeps the coarse grid only as a disposable "detection copy" used to find the landmarks and the Frankfort-plane rotation, but crops the eardrum ROI from the **native-resolution scan resampled directly to a finer isotropic spacing (0.2 mm by default)** — with no intermediate downsampling step.
+
+#### Processing steps
+
+| Step | Description |
+|---|---|
+| 1. Head localization | Same as P1: clips intensity to [-1000, 2007 HU], runs TotalSegmentator to find eyes/auditory canals, and crops a 200×270×200 mm ROI (+50 mm at the top) centered on the ear midpoint — all at native resolution. |
+| 2. Reference frames | Builds two volumes from the native-resolution crop: (a) a disposable low-res volume (0.5 mm spacing, padded to 540³, resampled to 256³) matching the grid the landmark model was trained on, and (b) — since the pipeline calls this script with `--fast False` — the **full high-resolution volume** resampled directly to 0.2 mm isotropic spacing. |
+| 3. Landmark detection | Runs the same 3D U-Net landmark model used by P2 on the disposable low-res volume to locate landmarks 8–13. |
+| 4. Frankfort-plane alignment | Computes the same two-step rotation as P2 (horizontal + left-right correction), including the no-eyes/mandible fallback and QA rotation-angle flagging. Because `--fast False`, the entire high-resolution volume is physically rotated to match (not just the landmark coordinates). |
+| 5. Ear crop + mirror | Crops a **256³ voxel cube (51.2 mm at 0.2 mm spacing)** centered on the aligned right-ear landmark (10) / left-ear landmark (11), offset 20 mm along X (sign mirrored for the left ear) to better enclose the cochlea. The crop's output affine is computed so it geometrically overlaps the same local coordinate frame P3/P4 would have produced — it replicates P3's 90-voxel ROI box at ~1.05 mm and P4's origin reset internally, so no transform logs from the main pipeline are needed. The left ear is flipped along axis 0 to match P3's mirroring convention. |
+| 6. Normalization | Clips to [-1000, 2007 HU] and scales to [0, 1] float32, identical to P4's final step. Both the raw-HU and normalized crops are saved. |
+| 7. Transform log | Saves a per-patient JSON recording every step (centroids, landmark coordinates, rotation matrix, crop geometry) — the information needed to later map an eardrum segmentation back onto the original scan. |
+
+#### How it differs from the main P1→P4 pipeline
+
+| | Main pipeline (P1–P4) | Eardrum track |
+|---|---|---|
+| Final spacing | ~1.05 mm isotropic | 0.2 mm isotropic (configurable) |
+| Final FOV | 90³ voxels (≈ 94.5 mm cube) | 256³ voxels (51.2 mm cube) |
+| Downsampling before crop | Yes (onto the 1.05 mm grid) | No — cropped directly from native resolution |
+| Landmark model | Same 3D U-Net (landmarks 8–13) | Same 3D U-Net, reused only for detection |
+| Dependency on transform logs | N/A (is the source of the logs) | None — recomputes its own alignment independently |
+| Failure handling in `run_full_pipeline.sh` | Stops the pipeline | Logged as a warning; pipeline continues (auxiliary step) |
+
+**Output** (per patient, in `Processed_eardrum/{patient_id}/`):
+- `{patient_id}_right_ear_raw_hu.nii.gz` / `{patient_id}_left_ear_raw_hu.nii.gz` — raw Hounsfield-unit crops
+- `{patient_id}_right_ear_0000.nii.gz` / `{patient_id}_left_ear_0000.nii.gz` — normalized to [0, 1] (left mirrored)
+- `{patient_id}_transform_log.json` — full record of every processing step
+- `visualizations/` — optional QA screenshots
+- If this step fails, the pipeline logs a warning and continues (non-critical auxiliary step)
 
 ---
 
@@ -559,6 +638,46 @@ python postprocessing/generate_results.py \
 - Tissue vs air STL meshes → `Results/stl/`
 - Bone NIfTI masks (skull + mandible) → `Results/masks_bone/`
 - Bone STL meshes → `Results/stl_bone/`
+
+---
+
+### Map to Original Space (`postprocessing/map_results_to_original.py`)
+
+**Environment:** `landmark_env` (venv)
+
+The pipeline outputs live in the ear-local processing space (P1 standardizes
+orientation, P2 aligns to the Frankfort plane, and P3 crops/mirrors each ear and
+resets the origin). This step maps the results back onto the **original scan
+grid** so masks, STL meshes, and markups can be overlaid on the raw CT.
+
+**How it works:** the whole result→original chain is a composition of
+voxel-space affine operations, so per ear it collapses to a single 4×4 matrix
+built from the `P1`, `P2`, and `P3` transform logs (`Logs/transform_logs/`) plus
+the intermediate NIfTIs in `Processed-Data/{patient_id}/`. Masks are resampled
+onto the original CT grid (nearest neighbour, so they share the original
+affine/shape); STL vertices and markup positions are mapped point-by-point. It
+is independent of the input affine convention (`x,y,z` or `-x,-y,z`).
+
+#### Running It Separately
+
+```bash
+python postprocessing/map_results_to_original.py \
+    --logs_dir      "/path/to/Output/Logs/transform_logs" \
+    --processed_dir "/path/to/Processed-Data" \
+    --masks_dir      "/path/to/Output/Results/masks" \
+    --masks_bone_dir "/path/to/Output/Results/masks_bone" \
+    --stl_dir        "/path/to/Output/Results/stl" \
+    --stl_bone_dir   "/path/to/Output/Results/stl_bone" \
+    --markups_dir    "/path/to/Output/Results/markups" \
+    --output_dir     "/path/to/Output/Results_original_space"
+```
+
+Add `--validate` (instead of `--output_dir`) to sanity-check the transform: it
+maps each canal-mask centroid to original coordinates and prints the distance to
+the ear centroid recorded by P1. Use `--patients ID1 ID2 ...` to limit the run.
+
+**Output** (`Results_original_space/`): `masks/`, `masks_bone/`, `stl/`,
+`stl_bone/`, and `markups/`, all in original scan coordinates.
 
 ---
 
@@ -877,4 +996,16 @@ The script will:
 ## References
 
 - **TotalSegmentator:** Wasserthal et al. (2023). TotalSegmentator: Robust Segmentation of 104 Anatomic Structures in CT Images. *Radiology: Artificial Intelligence*. https://doi.org/10.1148/ryai.230024
+
+---
+
+## Changes from Previous Version
+
+`sh_files/run_full_pipeline.sh` was updated with the following changes (not yet reflected elsewhere in this document):
+
+- **Step count increased from 9 to 10** — a new auxiliary step, **Eardrum Preprocessing**, now runs after P4 and before Tissue/Air Inference. It crops high-resolution volumes around the eardrum (via `pre-processing-eardrum.py`) for separate eardrum analysis. Failures in this step are logged as warnings but do not stop the pipeline.
+- **New `METRIC_ENV` variable** — the metric extraction conda environment is now activated by absolute path (`/home/ajie/.conda/envs/metric_env`) instead of by name, avoiding ambiguity with other users' identically named environments.
+- **New `MAP_TO_ORIGINAL` option** (default `"True"`) — lets you skip the "map results back to original scan space" step entirely.
+- **New `EXPORT_SLICER_MARKUPS` option** (default `"True"`) — additionally exports landmarks as 3D Slicer-compatible markup files (`.mrk.json`) into `Results/markups_slicer/`.
+- **New output directories**: `Processed_eardrum/` (eardrum crops) and `Results/markups_slicer/` (Slicer markup exports).
 
